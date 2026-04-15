@@ -260,8 +260,8 @@ RUNIC_UPGRADES = [
 # SKILL THRESHOLDS  — every 5 levels, bonuses to gather odds, crit, specials
 # ---------------------------------------------------------------------------
 # Base special-item chance (very low; scales via skill level)
-BASE_SPECIAL_CHANCE = 0.005   # 0.5% per strike base
-SPECIAL_CHANCE_PER_LEVEL = 0.0006  # +0.06% per skill level (100 * 0.0006 = 6% max)
+BASE_SPECIAL_CHANCE = 0.02    # 2% base chance per strike
+SPECIAL_CHANCE_PER_LEVEL = 0.0011  # +0.11% per skill level (max +11% at lv 100 = 13% total)
 
 # Crit multiplier on resource amount
 CRIT_MULTIPLIER = 2
@@ -340,6 +340,43 @@ XP_TABLE = [0] + [int(100 * (lvl ** 1.6)) for lvl in range(1, 100)]
 PRESTIGE_BASE_COST = 5000
 PRESTIGE_COST_MULTIPLIER = 1.8
 
+PRESTIGE_BONUS_DEFS = [
+    {
+        "id": "resource_gain",
+        "label": "⛏ Resource Gain",
+        "desc": "+12% gather chance and +10% resource amount per stack.",
+    },
+    {
+        "id": "gold_gain",
+        "label": "🪙 Gold Gain",
+        "desc": "+18% gold from selling per stack.",
+    },
+    {
+        "id": "xp_gain",
+        "label": "⬆ XP Gain",
+        "desc": "+15% XP from all actions per stack.",
+    },
+    {
+        "id": "refine_speed",
+        "label": "🔥 Refining Mastery",
+        "desc": "+15% refining speed per stack.",
+    },
+    {
+        "id": "special_find",
+        "label": "✨ Fortune",
+        "desc": "+1.2% special-item chance per stack.",
+    },
+    {
+        "id": "crit_boost",
+        "label": "⚡ Critical Fortune",
+        "desc": "+2% critical chance and +10% crit yield per stack.",
+    },
+]
+
+
+def default_prestige_bonuses() -> dict:
+    return {bonus["id"]: 0 for bonus in PRESTIGE_BONUS_DEFS}
+
 STRIKE_FRAMES = 9
 STRIKE_W, STRIKE_H = 64, 47
 STRIKE_DELAY = 20
@@ -412,7 +449,7 @@ class GameState:
     runic_tiers: dict = field(default_factory=dict)  # runic_id -> tier count
     prestige_tier: int = 0
     prestige_coins: int = 0
-    prestige_bonuses: dict = field(default_factory=lambda: {"resource_gain": 0, "gold_gain": 0, "xp_gain": 0})
+    prestige_bonuses: dict = field(default_factory=default_prestige_bonuses)
 
     # Harvest Spirit active state (runtime only, not saved)
     _spirit_active: bool = field(default=False, init=False, repr=False, compare=False)
@@ -448,7 +485,11 @@ class GameState:
         gs.runic_tiers = d.get("runic_tiers", {})
         gs.prestige_tier = d.get("prestige_tier", 0)
         gs.prestige_coins = d.get("prestige_coins", 0)
-        gs.prestige_bonuses = d.get("prestige_bonuses", {"resource_gain": 0, "gold_gain": 0, "xp_gain": 0})
+        loaded_bonuses = d.get("prestige_bonuses", {})
+        gs.prestige_bonuses = default_prestige_bonuses()
+        for key, value in loaded_bonuses.items():
+            if key in gs.prestige_bonuses:
+                gs.prestige_bonuses[key] = value
         return gs
 
     def save(self):
@@ -503,7 +544,7 @@ class GameState:
         skill_map = {"tree": "woodChopping", "rock": "stoneMining", "oreDeposit": "ironMining"}
         skill_id = skill_map.get(node_id, "")
         base = RESOURCE_NODES[node_id]["base_chance"]
-        prestige_bonus = self.prestige_bonuses.get("resource_gain", 0) * 0.05
+        prestige_bonus = self.prestige_bonuses.get("resource_gain", 0) * 0.12
         skill_bonus = self._skill_level(skill_id) * 0.003 if skill_id else 0.0
         # Tool bonus (axe for tree; pickaxe for rock/oreDeposit)
         tool_id = "axe" if node_id == "tree" else "pickaxe"
@@ -522,7 +563,7 @@ class GameState:
         # Each tier gives +gather_delta fraction; floor to get extra whole items
         tool_bonus_frac = tool_def.get("gather_delta", 0) * tool_tier
         runic_gather_tier = self.runic_tiers.get("rune_gather", 0)
-        base = 1 + runic_gather_tier  # rune of abundance adds 1 per tier
+        base = 1 + runic_gather_tier + self.prestige_bonuses.get("resource_gain", 0) * 0.10
         spirit_mult = HARVEST_SPIRIT_GATHER_BONUS if self.spirit_remaining() > 0 else 1.0
         # tool_bonus_frac adds fractional chance for an extra item
         extra = int(tool_bonus_frac) + (1 if random.random() < (tool_bonus_frac % 1.0) else 0)
@@ -533,14 +574,18 @@ class GameState:
         skill_id = skill_map.get(node_id, "")
         level = self._skill_level(skill_id) if skill_id else 1
         runic_crit_tier = self.runic_tiers.get("rune_crit", 0)
-        base_crit = BASE_CRIT_CHANCE + runic_crit_tier * 0.05
+        base_crit = BASE_CRIT_CHANCE + runic_crit_tier * 0.05 + self.prestige_bonuses.get("crit_boost", 0) * 0.02
         return min(base_crit + level * CRIT_CHANCE_PER_LEVEL, 0.75)
+
+    def get_crit_multiplier(self) -> float:
+        return CRIT_MULTIPLIER + self.prestige_bonuses.get("crit_boost", 0) * 0.10
 
     def get_special_item_chance(self, node_id: str) -> float:
         skill_map = {"tree": "woodChopping", "rock": "stoneMining", "oreDeposit": "ironMining"}
         skill_id = skill_map.get(node_id, "")
         level = self._skill_level(skill_id) if skill_id else 1
-        return min(BASE_SPECIAL_CHANCE + level * SPECIAL_CHANCE_PER_LEVEL, 0.30)
+        prestige_bonus = self.prestige_bonuses.get("special_find", 0) * 0.012
+        return min(BASE_SPECIAL_CHANCE + level * SPECIAL_CHANCE_PER_LEVEL + prestige_bonus, 0.45)
 
     def roll_special_item(self, node_id: str) -> Optional[str]:
         """Return a special item id if the player hits the special drop, else None."""
@@ -549,14 +594,14 @@ class GameState:
             return None
         is_mining = node_id in ("rock", "oreDeposit")
         if is_mining:
-            # Mining: Runic Shard or Geode (60/40)
-            return "runicShard" if random.random() < 0.60 else "geode"
+            # Mining: Geode more common than Runic Shard (55/45)
+            return "geode" if random.random() < 0.55 else "runicShard"
         else:
-            # Chopping: Harvest Spirit / Fairy Dust / Runic Shard (20/40/40)
+            # Chopping: Harvest Spirit / Fairy Dust / Runic Shard (35/30/35)
             r = random.random()
-            if r < 0.20:
+            if r < 0.35:
                 return "harvestSpirit"
-            elif r < 0.60:
+            elif r < 0.65:
                 return "fairyDust"
             else:
                 return "runicShard"
@@ -584,7 +629,7 @@ class GameState:
             base = RESOURCES[resource_id]["value"]
         else:
             base = SPECIAL_ITEMS.get(resource_id, {}).get("value", 0)
-        prestige_bonus = 1 + self.prestige_bonuses.get("gold_gain", 0) * 0.10
+        prestige_bonus = 1 + self.prestige_bonuses.get("gold_gain", 0) * 0.18
         trading_bonus = 1 + self._skill_level("trading") * 0.003
         # Merchant stall tool bonus
         stall_tier = self.tool_tiers.get("merchant_stall", 0)
@@ -607,13 +652,14 @@ class GameState:
         tool_tier = self.tool_tiers.get(tool_id, 0)
         tool_def = next((t for t in TOOL_UPGRADES if t["id"] == tool_id), {})
         tool_bonus = tool_def.get("refine_delta", 0) * tool_tier
-        return 1.0 * (1 + skill_bonus + tool_bonus)
+        prestige_bonus = self.prestige_bonuses.get("refine_speed", 0) * 0.15
+        return 1.0 * (1 + skill_bonus + tool_bonus + prestige_bonus)
 
     # ------------------------------------------------------------------
     # XP
     # ------------------------------------------------------------------
     def get_effective_xp(self, base_xp: float) -> float:
-        prestige_bonus = 1 + self.prestige_bonuses.get("xp_gain", 0) * 0.10
+        prestige_bonus = 1 + self.prestige_bonuses.get("xp_gain", 0) * 0.15
         rune_xp_tier = self.runic_tiers.get("rune_xp", 0)
         rune_bonus = 1 + rune_xp_tier * 0.10
         return base_xp * prestige_bonus * rune_bonus
@@ -633,11 +679,32 @@ class GameState:
     def prestige_cost(self) -> int:
         return int(PRESTIGE_BASE_COST * (PRESTIGE_COST_MULTIPLIER ** self.prestige_tier))
 
+    def prestige_cost_for_tier(self, tier: int) -> int:
+        return int(PRESTIGE_BASE_COST * (PRESTIGE_COST_MULTIPLIER ** tier))
+
     def can_prestige(self) -> bool:
         return self.gold >= self.prestige_cost()
 
-    def do_prestige(self):
-        if not self.can_prestige():
+    def max_consecutive_prestiges(self) -> int:
+        total_gold = int(self.gold)
+        tier = self.prestige_tier
+        count = 0
+        while total_gold >= self.prestige_cost_for_tier(tier):
+            total_gold -= self.prestige_cost_for_tier(tier)
+            tier += 1
+            count += 1
+        return count
+
+    def total_prestige_cost(self, count: int) -> int:
+        if count <= 0:
+            return 0
+        return sum(self.prestige_cost_for_tier(self.prestige_tier + offset) for offset in range(count))
+
+    def do_prestige(self, count: int = 1):
+        if count <= 0:
+            return False
+        total_cost = self.total_prestige_cost(count)
+        if self.gold < total_cost:
             return False
         self.gold = 0
         for k in self.skills:
@@ -646,8 +713,8 @@ class GameState:
         self.special_items = {k: 0 for k in SPECIAL_ITEMS}
         self.tool_tiers.clear()
         # runic_tiers intentionally NOT cleared — permanent
-        self.prestige_tier += 1
-        self.prestige_coins += 1
+        self.prestige_tier += count
+        self.prestige_coins += count
         return True
 
     def spend_prestige_coin(self, bonus_type: str) -> bool:
@@ -719,52 +786,170 @@ class GameState:
 # AUDIO
 # ---------------------------------------------------------------------------
 class AudioManager:
+    """
+    Manages SFX playback for node interactions.
+
+    Uses QMediaPlayer (supports MP3) with a pooled architecture so spam
+    clicks are handled without audio stutter.  Each sound category
+    ("chop", "mine") has 4 variant files.  We pre-allocate a pool of
+    QMediaPlayer+QAudioOutput pairs per variant; on play() a random
+    variant is chosen and an idle player from that variant's pool is
+    used.  A per-category concurrent cap prevents audio soup on extreme
+    spam.  Must be instantiated AFTER QApplication exists.
+    """
+
+    # QMediaPlayer instances per variant file (allows that many overlapping
+    # plays of the exact same clip without interrupting each other).
+    _POOL_SIZE = 3
+    # Hard cap: if this many players across a category are already playing,
+    # skip the new play entirely — the user's ears are saturated.
+    _MAX_CONCURRENT = 4
+    # Do not trigger the same category faster than this. This avoids hammering
+    # the media backend when clicks arrive far faster than humans can perceive.
+    _MIN_INTERVAL_S = 0.045
+    # Bounded backlog per category. If the player clicks faster than this can
+    # drain, extra requests are dropped so audio catches up almost immediately
+    # after input stops instead of continuing for seconds.
+    _MAX_PENDING_PER_CATEGORY = 2
+
+    # Maps category -> variant filenames
+    _CATEGORY_FILES: dict[str, list[str]] = {
+        "chop": [f"chop{i}.mp3"   for i in range(1, 5)],
+        "mine": [f"mining{i}.mp3" for i in range(1, 5)],
+    }
+
     def __init__(self):
-        self._sfx_volume = 0.8
-        self._music_volume = 0.5
-        self._sounds: dict = {}
+        self._sfx_volume: float = 0.8
+        self._music_volume: float = 0.5
+        self._available: bool = False
+        # pools[category][variant_index] = [(QMediaPlayer, QAudioOutput), ...]
+        self._pools: dict[str, list[list]] = {}
+        self._last_play_at: dict[str, float] = {}
+        self._pending_requests: dict[str, int] = {}
+        self._drain_timer = QTimer()
+        self._drain_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._drain_timer.setSingleShot(False)
+        self._drain_timer.setInterval(15)
+        self._drain_timer.timeout.connect(self._drain_requests)
         try:
-            from PySide6.QtMultimedia import QSoundEffect, QMediaPlayer, QAudioOutput
-            self._QSoundEffect = QSoundEffect
+            from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput  # noqa: F401
             self._available = True
-            self._load_sounds()
-        except Exception:
-            self._available = False
+            self._load_pools()
+        except Exception as exc:
+            print(f"[Audio] QtMultimedia unavailable: {exc}")
 
-    def _load_sounds(self):
+    def _load_pools(self) -> None:
+        from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+        from PySide6.QtCore import QUrl
+
+        for category, files in self._CATEGORY_FILES.items():
+            variant_pools: list[list] = []
+            for filename in files:
+                path = BASE_DIR / filename
+                pool: list = []
+                if path.exists():
+                    url = QUrl.fromLocalFile(str(path))
+                    for _ in range(self._POOL_SIZE):
+                        try:
+                            player = QMediaPlayer()
+                            audio_out = QAudioOutput()
+                            audio_out.setVolume(self._sfx_volume)
+                            player.setAudioOutput(audio_out)
+                            player.setSource(url)
+                            pool.append((player, audio_out))
+                        except Exception as e:
+                            print(f"[Audio] load error {filename}: {e}")
+                else:
+                    print(f"[Audio] file not found: {path}")
+                variant_pools.append(pool)
+            self._pools[category] = variant_pools
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def play(self, category: str) -> None:
+        """Queue a bounded SFX request for *category* ("chop" or "mine")."""
         if not self._available:
             return
-        for name, filename in [("chop", "chop.mp3"), ("mine", "mine.mp3")]:
-            path = BASE_DIR / filename
-            if path.exists():
-                try:
-                    from PySide6.QtMultimedia import QSoundEffect
-                    from PySide6.QtCore import QUrl
-                    s = QSoundEffect()
-                    s.setSource(QUrl.fromLocalFile(str(path)))
-                    s.setVolume(self._sfx_volume)
-                    self._sounds[name] = s
-                except Exception as e:
-                    print(f"Audio load error {name}: {e}")
-
-    def play(self, name: str):
-        if not self._available:
+        if category not in self._pools:
             return
-        s = self._sounds.get(name)
-        if s:
-            s.setVolume(self._sfx_volume)
-            s.play()
+        pending = self._pending_requests.get(category, 0)
+        if pending >= self._MAX_PENDING_PER_CATEGORY:
+            return
+        self._pending_requests[category] = pending + 1
+        if not self._drain_timer.isActive():
+            self._drain_timer.start()
 
-    def set_sfx_volume(self, v: float):
+    def _drain_requests(self) -> None:
+        if not any(self._pending_requests.values()):
+            self._drain_timer.stop()
+            return
+
+        # Try to service one queued request per tick in a stable category order.
+        for category in self._CATEGORY_FILES:
+            if self._pending_requests.get(category, 0) <= 0:
+                continue
+            if self._try_play_now(category):
+                self._pending_requests[category] -= 1
+                break
+
+        if not any(self._pending_requests.values()):
+            self._drain_timer.stop()
+
+    def _try_play_now(self, category: str) -> bool:
+        """Attempt one immediate play. Returns True only if a sound started."""
+        variant_pools = self._pools.get(category)
+        if not variant_pools:
+            return False
+
+        now = time.perf_counter()
+        if now - self._last_play_at.get(category, 0.0) < self._MIN_INTERVAL_S:
+            return False
+
+        from PySide6.QtMultimedia import QMediaPlayer as _QMP
+        _playing = _QMP.PlaybackState.PlayingState
+
+        # Enforce a hard concurrent cap to prevent audio soup
+        total_playing = sum(
+            1 for pool in variant_pools
+            for (player, _) in pool
+            if player.playbackState() == _playing
+        )
+        if total_playing >= self._MAX_CONCURRENT:
+            return False
+
+        # Build a list of (variant_pool, idle_player, audio_out) tuples
+        # Only include variants that have at least one genuinely idle slot.
+        candidates: list[tuple] = []
+        for pool in variant_pools:
+            for (p, ao) in pool:
+                if p.playbackState() != _playing:
+                    candidates.append((p, ao))
+                    break   # one idle slot per variant is enough to make it eligible
+
+        if not candidates:
+            return False   # all slots busy — try again next drain tick
+
+        # Pick a random eligible variant, then grab its first idle slot
+        player, audio_out = random.choice(candidates)
+        self._last_play_at[category] = now
+        player.play()
+        return True
+
+    def set_sfx_volume(self, v: float) -> None:
         self._sfx_volume = max(0.0, min(1.0, v))
-        for s in self._sounds.values():
-            s.setVolume(self._sfx_volume)
+        for variant_pools in self._pools.values():
+            for pool in variant_pools:
+                for (_, audio_out) in pool:
+                    audio_out.setVolume(self._sfx_volume)
 
-    def set_music_volume(self, v: float):
+    def set_music_volume(self, v: float) -> None:
         self._music_volume = max(0.0, min(1.0, v))
 
 
-AUDIO = AudioManager()
+# Placeholder — replaced with a real instance in main() after QApplication exists.
+AUDIO: "AudioManager" = None  # type: ignore
 
 # ---------------------------------------------------------------------------
 # SPRITE SHEET LOADER
@@ -795,6 +980,7 @@ def load_image(filename: str) -> Optional[QPixmap]:
 class SignalBus(QObject):
     inventory_changed = Signal()
     gold_changed = Signal()
+    prestige_changed = Signal()
     xp_changed = Signal(str, int)      # skill, new_xp
     node_hit = Signal(str, bool)       # node_id, success
     refine_complete = Signal(str, int) # station_id, amount
@@ -850,15 +1036,23 @@ class SpriteWidget(QWidget):
         self._loop = loop
         self._current = 0
         self._playing = False
+        self._anim_start: float = 0.0  # perf_counter timestamp when play() was called
+        # Poll at 8 ms — faster than one OS tick so we always catch the right frame
+        # even when the OS timer resolution is coarser than _delay.
         self._timer = QTimer(self)
-        self._timer.timeout.connect(self._next_frame)
+        self._timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._timer.setSingleShot(False)
+        self._timer.setInterval(8)
+        self._timer.timeout.connect(self._tick)
         if frames:
             self.setFixedSize(frames[0].size())
 
     def set_frames(self, frames: list[QPixmap], delay_ms: int = 100):
+        self._timer.stop()
         self._frames = frames
         self._delay = delay_ms
         self._current = 0
+        self._playing = False
         if frames:
             self.setFixedSize(frames[0].size())
         self.update()
@@ -866,32 +1060,39 @@ class SpriteWidget(QWidget):
     def play(self, loop: bool | None = None):
         if loop is not None:
             self._loop = loop
+        self._timer.stop()
         self._current = 0
         self._playing = True
-        self._timer.start(self._delay)
+        self._anim_start = time.perf_counter()
+        self._timer.start()
+        self.update()
 
     def stop(self):
         self._playing = False
         self._timer.stop()
 
-    def _next_frame(self):
-        if not self._frames:
+    def _tick(self):
+        if not self._frames or not self._playing:
             return
-        self._current += 1
-        if self._current >= len(self._frames):
-            if self._loop:
-                self._current = 0
-            else:
-                self._current = len(self._frames) - 1
-                self.stop()
-                self.animation_done.emit()
-        self.update()
+        total_ms = len(self._frames) * self._delay
+        elapsed_ms = (time.perf_counter() - self._anim_start) * 1000.0
+        if not self._loop and elapsed_ms >= total_ms:
+            self._current = len(self._frames) - 1
+            self.stop()
+            self.update()
+            self.animation_done.emit()
+        else:
+            frame = int((elapsed_ms % total_ms) / self._delay) if self._loop \
+                else min(int(elapsed_ms / self._delay), len(self._frames) - 1)
+            if frame != self._current:
+                self._current = frame
+                self.update()
 
     def paintEvent(self, event):
         if not self._frames:
             return
         p = QPainter(self)
-        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        p.setRenderHint(QPainter.SmoothPixmapTransform, False)
         px = self._frames[self._current]
         p.drawPixmap(self.rect(), px)
 
@@ -1002,19 +1203,23 @@ class AnimatedNumber(QLabel):
         super().__init__(parent)
         self._value = value
         self._fmt = fmt
+        # Persistent effect + animation — reused every update, never re-created
+        self._eff = QGraphicsOpacityEffect(self)
+        self._eff.setOpacity(1.0)
+        self.setGraphicsEffect(self._eff)
+        self._flash_anim = QPropertyAnimation(self._eff, b"opacity", self)
+        self._flash_anim.setDuration(200)
+        self._flash_anim.setStartValue(0.3)
+        self._flash_anim.setEndValue(1.0)
         self._update_text()
 
     def set_value(self, v: float, animate=True):
         old = self._value
         self._value = v
         if animate and abs(v - old) > 0.5:
-            eff = QGraphicsOpacityEffect(self)
-            self.setGraphicsEffect(eff)
-            anim = QPropertyAnimation(eff, b"opacity")
-            anim.setDuration(200)
-            anim.setStartValue(0.3)
-            anim.setEndValue(1.0)
-            anim.start(QPropertyAnimation.DeleteWhenStopped)
+            self._flash_anim.stop()
+            self._eff.setOpacity(0.3)
+            self._flash_anim.start()
         self._update_text()
 
     def _update_text(self):
@@ -1028,45 +1233,100 @@ class AnimatedNumber(QLabel):
 # FLOATING TEXT  (rising "+X XP" / "+X🪙" notification)
 # ---------------------------------------------------------------------------
 class FloatingText(QLabel):
-    """Rising floating text notification — fades in, floats up, fades out (~1.5s)."""
-    def __init__(self, text: str, color: str, parent: QWidget,
-                 cx: int = -1, cy: int = -1):
-        super().__init__(text, parent)
+    """
+    Reusable rising text notification.  Instead of being created and
+    destroyed on every click, instances are recycled via a per-parent pool
+    (see spawn_floating_text()).  Each instance owns its QGraphicsOpacityEffect
+    and both QPropertyAnimations permanently — they are just re-targeted on
+    each reuse, avoiding repeated alloc/dealloc under spam-click conditions.
+    """
+
+    # Hard cap on how many FloatingText labels may exist simultaneously per
+    # parent window.  If the pool is fully active, new spawns are dropped.
+    _MAX_POOL = 8
+
+    # Class-level pool: parent_widget -> [FloatingText, ...]
+    _pool: dict = {}
+
+    @classmethod
+    def spawn(cls, text: str, color: str, parent: QWidget,
+              cx: int = -1, cy: int = -1) -> None:
+        """Acquire an idle instance from the pool (or create one if needed)
+        and play the rise animation.  Safe to call at any rate."""
+        pool = cls._pool.setdefault(id(parent), [])
+
+        # Find an idle (hidden) instance
+        instance = None
+        for ft in pool:
+            if ft.isHidden():
+                instance = ft
+                break
+
+        # Create a new slot if under the cap
+        if instance is None:
+            if len(pool) >= cls._MAX_POOL:
+                return   # pool saturated — silently drop
+            instance = cls(parent)
+            pool.append(instance)
+
+        instance._play(text, color, cx, cy)
+
+    # ------------------------------------------------------------------
+    def __init__(self, parent: QWidget):
+        super().__init__(parent)
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
         self.setFont(scaled_font(FONT_BODY, 13, bold=True))
+
+        self._eff = QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(self._eff)
+
+        self._pos_anim = QPropertyAnimation(self, b"pos", self)
+        self._pos_anim.setDuration(1500)
+        self._pos_anim.setEasingCurve(QEasingCurve.OutCubic)
+
+        self._opa_anim = QPropertyAnimation(self._eff, b"opacity", self)
+        self._opa_anim.setDuration(1500)
+        self._opa_anim.setKeyValueAt(0.0,  0.0)
+        self._opa_anim.setKeyValueAt(0.12, 1.0)
+        self._opa_anim.setKeyValueAt(0.65, 1.0)
+        self._opa_anim.setKeyValueAt(1.0,  0.0)
+
+        self._grp = QParallelAnimationGroup(self)
+        self._grp.addAnimation(self._pos_anim)
+        self._grp.addAnimation(self._opa_anim)
+        self._grp.finished.connect(self.hide)
+        self.hide()
+
+    def _play(self, text: str, color: str, cx: int, cy: int) -> None:
+        # Stop any in-progress animation before reusing
+        self._grp.stop()
+        self._eff.setOpacity(0.0)
+
+        self.setText(text)
         self.setStyleSheet(f"color: {color}; background: transparent; border: none;")
         self.adjustSize()
+
+        p = self.parent()
         if cx < 0:
-            cx = parent.width() // 2
+            cx = p.width() // 2
         if cy < 0:
-            cy = parent.height() // 2 - 20
+            cy = p.height() // 2 - 20
+
         sx = cx - self.width() // 2
         sy = cy - self.height() // 2
         self.move(sx, sy)
         self.show()
         self.raise_()
 
-        eff = QGraphicsOpacityEffect(self)
-        self.setGraphicsEffect(eff)
-
-        self._pos_anim = QPropertyAnimation(self, b"pos", self)
-        self._pos_anim.setDuration(1500)
         self._pos_anim.setStartValue(QPoint(sx, sy))
         self._pos_anim.setEndValue(QPoint(sx, sy - 80))
-        self._pos_anim.setEasingCurve(QEasingCurve.OutCubic)
-
-        self._opa_anim = QPropertyAnimation(eff, b"opacity", self)
-        self._opa_anim.setDuration(1500)
-        self._opa_anim.setKeyValueAt(0.0, 0.0)
-        self._opa_anim.setKeyValueAt(0.12, 1.0)
-        self._opa_anim.setKeyValueAt(0.65, 1.0)
-        self._opa_anim.setKeyValueAt(1.0, 0.0)
-
-        self._grp = QParallelAnimationGroup(self)
-        self._grp.addAnimation(self._pos_anim)
-        self._grp.addAnimation(self._opa_anim)
-        self._grp.finished.connect(self.deleteLater)
         self._grp.start()
+
+
+def spawn_floating_text(text: str, color: str, parent: QWidget,
+                        cx: int = -1, cy: int = -1) -> None:
+    """Convenience wrapper — use this everywhere instead of FloatingText(...)."""
+    FloatingText.spawn(text, color, parent, cx, cy)
 
 
 # ---------------------------------------------------------------------------
@@ -1369,10 +1629,12 @@ class SettingsDialog(QDialog):
         title.setStyleSheet(f"color: {PALETTE['accent']}; border: none; background: transparent;")
         lay.addWidget(title)
 
-        self._add_slider(lay, "🎵 Music Volume", 0, 100, int(AUDIO._music_volume * 100),
-                         lambda v: AUDIO.set_music_volume(v / 100))
-        self._add_slider(lay, "🔊 SFX Volume", 0, 100, int(AUDIO._sfx_volume * 100),
-                         lambda v: AUDIO.set_sfx_volume(v / 100))
+        init_music = int((AUDIO._music_volume if AUDIO else 0.5) * 100)
+        init_sfx   = int((AUDIO._sfx_volume   if AUDIO else 0.8) * 100)
+        self._add_slider(lay, "🎵 Music Volume", 0, 100, init_music,
+                         self._on_music_changed)
+        self._add_slider(lay, "🔊 SFX Volume", 0, 100, init_sfx,
+                         self._on_sfx_changed)
 
         # UI Scale slider (50 % – 150 %)
         cfg = load_config()
@@ -1422,6 +1684,22 @@ class SettingsDialog(QDialog):
         btn_row.addWidget(close)
         btn_row.addWidget(exit_btn)
         lay.addLayout(btn_row)
+
+    def _on_music_changed(self, value: int):
+        v = value / 100
+        if AUDIO:
+            AUDIO.set_music_volume(v)
+        cfg = load_config()
+        cfg["music_volume"] = v
+        save_config(cfg)
+
+    def _on_sfx_changed(self, value: int):
+        v = value / 100
+        if AUDIO:
+            AUDIO.set_sfx_volume(v)
+        cfg = load_config()
+        cfg["sfx_volume"] = v
+        save_config(cfg)
 
     def _on_scale_changed(self, value: int):
         cfg = load_config()
@@ -1513,11 +1791,88 @@ class GatherPage(QWidget):
         pass  # future: highlight unlockable nodes
 
     def refresh(self):
+        if not self.isVisible():
+            return
         for card in self._node_cards.values():
             card.refresh()
 
 
+# ---------------------------------------------------------------------------
+# BOUNCING SPRITE  — timer-driven, layout-invisible bounce animation
+# ---------------------------------------------------------------------------
+class _BouncingSprite(QWidget):
+    """
+    Draws a sprite pixmap with a vertical offset in paintEvent.
+    The widget geometry never changes, so the layout manager is never involved
+    and refresh() calls on the parent card cannot interfere with the animation.
+
+    Animation is elapsed-time-based: bounce() records perf_counter() and the
+    offset is computed by sampling a normalised curve at the current time
+    position.  This runs at the correct speed regardless of OS timer resolution
+    (Windows coarsens QTimer intervals to ~15.6 ms by default).
+    """
+    # Normalised (0‥1) y-offset curve sampled at t=0..1 over _BOUNCE_MS
+    _CURVE: list[float] = [0.0, -1.0, -0.88, -0.60, -0.28, 0.12, 0.06, -0.01, 0.0]
+    _MAX_PX: int  = 14      # peak pixel displacement
+    _BOUNCE_MS: float = 110  # total animation duration in ms
+    _POLL_MS: int = 8        # timer poll interval (faster than one OS tick)
+
+    def __init__(self, w: int, h: int, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(w, h)
+        self.setAttribute(Qt.WA_OpaquePaintEvent, False)
+        self._pixmap: Optional[QPixmap] = None
+        self._offset_y: int = 0
+        self._bounce_start: float = -1.0  # negative = idle
+
+        self._timer = QTimer(self)
+        self._timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._timer.setInterval(self._POLL_MS)
+        self._timer.setSingleShot(False)
+        self._timer.timeout.connect(self._tick)
+
+    def set_pixmap(self, px: QPixmap) -> None:
+        self._pixmap = px
+        self.update()
+
+    def bounce(self) -> None:
+        """Start (or immediately restart) the bounce animation."""
+        self._bounce_start = time.perf_counter()
+        if not self._timer.isActive():
+            self._timer.start()
+        self.update()
+
+    def _tick(self) -> None:
+        if self._bounce_start < 0:
+            self._timer.stop()
+            return
+        elapsed_ms = (time.perf_counter() - self._bounce_start) * 1000.0
+        if elapsed_ms >= self._BOUNCE_MS:
+            self._offset_y = 0
+            self._bounce_start = -1.0
+            self._timer.stop()
+        else:
+            t = elapsed_ms / self._BOUNCE_MS           # 0..1
+            n = len(self._CURVE) - 1
+            fi = t * n
+            i = min(int(fi), n - 1)
+            frac = fi - i
+            v = self._CURVE[i] * (1.0 - frac) + self._CURVE[i + 1] * frac
+            self._offset_y = int(v * self._MAX_PX)
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        if not self._pixmap:
+            return
+        p = QPainter(self)
+        x = (self.width()  - self._pixmap.width())  // 2
+        y = (self.height() - self._pixmap.height()) // 2 + self._offset_y
+        p.drawPixmap(x, y, self._pixmap)
+
+
 class _NodeCard(QWidget):
+    _MAX_PENDING_FX = 3
+
     def __init__(self, node_id: str, node_def: dict, state: GameState,
                  strike_frames: list, parent=None):
         super().__init__(parent)
@@ -1526,9 +1881,24 @@ class _NodeCard(QWidget):
         self._state = state
         self._strike_frames = strike_frames
         self._locked = node_id not in state.unlocked_nodes
+        self._pending_fx_count: int = 0
+        self._pending_sound: Optional[str] = None
+        self._pending_inventory_emit = False
+        self._pending_refresh = False
+        self._pending_xp_skill: Optional[str] = None
+        self._pending_xp_value: int = 0
+        self._pending_level_up: Optional[tuple[str, int]] = None
+        self._pending_float_xp: int = 0
+        self._pending_float_color: Optional[str] = None
+        self._pending_feedback: Optional[tuple[str, str]] = None
+        self._pending_special_feedback: Optional[str] = None
+        self._pending_shard_delta: int = 0
+        self._flush_timer = QTimer(self)
+        self._flush_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._flush_timer.setSingleShot(False)
+        self._flush_timer.setInterval(33)
+        self._flush_timer.timeout.connect(self._flush_pending_ui)
         self._setup_ui()
-        self._press_anim: Optional[QPropertyAnimation] = None
-        self._sprite_orig_geom: Optional[QRect] = None
 
     def _setup_ui(self):
         root = QVBoxLayout(self)
@@ -1536,36 +1906,28 @@ class _NodeCard(QWidget):
         root.setSpacing(20)
         root.setContentsMargins(30, 30, 30, 30)
 
-        # Node sprite container
-        self._sprite_container = QFrame()
-        self._sprite_container.setFixedSize(250, 250)
-        self._sprite_container.setStyleSheet("background: transparent; border: none;")
-
-        inner = QVBoxLayout(self._sprite_container)
-        inner.setAlignment(Qt.AlignCenter)
-
+        # Node sprite — custom bouncing widget (layout geometry never changes)
         sprite_px = load_image(self._node_def["sprite"])
-        self._sprite_lbl = QLabel()
-        self._sprite_lbl.setAlignment(Qt.AlignCenter)
-        self._sprite_lbl.setStyleSheet("background: transparent; border: none;")
+        self._bounce_sprite = _BouncingSprite(250, 250)
         if sprite_px:
-            self._sprite_lbl.setPixmap(sprite_px.scaled(200, 200, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            self._bounce_sprite.set_pixmap(
+                sprite_px.scaled(200, 200, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            )
         else:
-            ph = make_placeholder(200, 200, self._node_def["name"])
-            self._sprite_lbl.setPixmap(ph)
-        inner.addWidget(self._sprite_lbl)
+            self._bounce_sprite.set_pixmap(make_placeholder(200, 200, self._node_def["name"]))
 
-        # Strike overlay — rendered 3x larger for visibility
+        # Strike overlay — child of the bouncing sprite so it moves with it
         strike_w = STRIKE_W * 3
         strike_h = STRIKE_H * 3
-        self._strike = SpriteWidget(self._strike_frames, STRIKE_DELAY, loop=False, parent=self._sprite_container)
+        self._strike = SpriteWidget(self._strike_frames, STRIKE_DELAY, loop=False,
+                                    parent=self._bounce_sprite)
         self._strike.setFixedSize(strike_w, strike_h)
-        self._strike.move(self._sprite_container.width() // 2 - strike_w // 2,
-                          self._sprite_container.height() // 2 - strike_h // 2)
+        self._strike.move(self._bounce_sprite.width()  // 2 - strike_w // 2,
+                          self._bounce_sprite.height() // 2 - strike_h // 2)
         self._strike.hide()
         self._strike.animation_done.connect(self._strike.hide)
 
-        root.addWidget(self._sprite_container, alignment=Qt.AlignCenter)
+        root.addWidget(self._bounce_sprite, alignment=Qt.AlignCenter)
 
         # Name
         name_lbl = QLabel(self._node_def["name"])
@@ -1625,6 +1987,10 @@ class _NodeCard(QWidget):
         self._feedback.setStyleSheet(f"color: {PALETTE['success']}; background: transparent; border: none;")
         self._feedback.setFixedHeight(30)
         root.addWidget(self._feedback)
+        # Single reusable timer — restarting it cancels any pending clear
+        self._feedback_timer = QTimer(self)
+        self._feedback_timer.setSingleShot(True)
+        self._feedback_timer.timeout.connect(lambda: self._feedback.setText(""))
 
         # Action button
         if self._locked:
@@ -1722,15 +2088,8 @@ class _NodeCard(QWidget):
             return
         node_def = self._node_def
         sound = "chop" if self._node_id == "tree" else "mine"
-        AUDIO.play(sound)
-
-        # Animate button press
-        self._animate_press()
-
-        # Show strike
-        if self._strike_frames:
-            self._strike.show()
-            self._strike.play(loop=False)
+        self._pending_sound = sound
+        self._pending_fx_count = min(self._pending_fx_count + 1, self._MAX_PENDING_FX)
 
         chance = self._state.get_effective_chance(self._node_id)
         success = random.random() < chance
@@ -1740,43 +2099,118 @@ class _NodeCard(QWidget):
             # Critical hit?
             crit = random.random() < self._state.get_crit_chance(self._node_id)
             if crit:
-                amount *= CRIT_MULTIPLIER
+                amount = max(1, int(round(amount * self._state.get_crit_multiplier())))
             self._state.inventory[yields_id] = self._state.inventory.get(yields_id, 0) + amount
             skill = node_def.get("xp_skill") or RESOURCES[yields_id]["xp_skill"]
             xp = node_def.get("xp_per_hit", 4) * amount
             eff_xp, leveled = self._state.add_xp(skill, xp)
-            BUS.inventory_changed.emit()
-            BUS.xp_changed.emit(skill, self._state.skills[skill].xp)
+            self._pending_inventory_emit = True
+            self._pending_xp_skill = skill
+            self._pending_xp_value = self._state.skills[skill].xp
             skill_color = SKILLS.get(skill, {}).get("color", PALETTE["accent"])
-            self._spawn_float(f"+{eff_xp} XP", skill_color)
+            if self._pending_float_color not in (None, skill_color):
+                self._pending_float_xp = 0
+            self._pending_float_color = skill_color
+            self._pending_float_xp += eff_xp
             if leveled:
-                BUS.level_up.emit(skill, self._state.skills[skill].level)
+                self._pending_level_up = (skill, self._state.skills[skill].level)
             res_name = RESOURCES[yields_id]["name"]
             if crit:
-                self._show_feedback(f"⚡ CRIT! +{amount} {res_name}", PALETTE["gold"])
+                self._pending_feedback = (f"⚡ CRIT! +{amount} {res_name}", PALETTE["gold"])
             else:
-                self._show_feedback(f"+{amount} {res_name}", PALETTE["success"])
+                self._pending_feedback = (f"+{amount} {res_name}", PALETTE["success"])
 
             # Special item drop?
             special = self._state.roll_special_item(self._node_id)
             if special:
                 self._state.special_items[special] = self._state.special_items.get(special, 0) + 1
                 sname = SPECIAL_ITEMS[special]["name"]
-                BUS.inventory_changed.emit()
+                self._pending_inventory_emit = True
                 if special == "runicShard":
-                    BUS.shard_delta.emit(1)
-                QTimer.singleShot(1100, lambda s=sname: self._show_feedback(f"✨ {s}!", PALETTE["accent"]))
+                    self._pending_shard_delta += 1
+                self._pending_special_feedback = sname
         else:
-            self._show_feedback("Miss!", PALETTE["text_muted"])
+            self._pending_feedback = ("Miss!", PALETTE["text_muted"])
 
         BUS.node_hit.emit(self._node_id, success)
-        self.refresh()
+        self._pending_refresh = True
+        self._schedule_flush()
+
+    def _schedule_flush(self):
+        if not self._flush_timer.isActive():
+            self._flush_timer.start()
+
+    def _has_pending_work(self) -> bool:
+        return any([
+            self._pending_fx_count > 0,
+            self._pending_sound is not None,
+            self._pending_inventory_emit,
+            self._pending_refresh,
+            self._pending_xp_skill is not None,
+            self._pending_level_up is not None,
+            self._pending_float_xp > 0,
+            self._pending_feedback is not None,
+            self._pending_special_feedback is not None,
+            self._pending_shard_delta > 0,
+        ])
+
+    def _flush_pending_ui(self):
+        if self._pending_sound:
+            AUDIO.play(self._pending_sound)
+            self._pending_sound = None
+
+        if self._pending_fx_count > 0:
+            self._bounce_sprite.bounce()
+            if self._strike_frames:
+                self._strike.show()
+                self._strike.play(loop=False)
+            self._pending_fx_count -= 1
+
+        if self._pending_inventory_emit:
+            BUS.inventory_changed.emit()
+            self._pending_inventory_emit = False
+
+        if self._pending_xp_skill is not None:
+            BUS.xp_changed.emit(self._pending_xp_skill, self._pending_xp_value)
+            self._pending_xp_skill = None
+            self._pending_xp_value = 0
+
+        if self._pending_shard_delta:
+            BUS.shard_delta.emit(self._pending_shard_delta)
+            self._pending_shard_delta = 0
+
+        if self._pending_float_xp > 0 and self._pending_float_color is not None:
+            self._spawn_float(f"+{self._pending_float_xp} XP", self._pending_float_color)
+            self._pending_float_xp = 0
+            self._pending_float_color = None
+
+        if self._pending_feedback:
+            text, color = self._pending_feedback
+            self._show_feedback(text, color)
+            self._pending_feedback = None
+
+        if self._pending_special_feedback:
+            sname = self._pending_special_feedback
+            QTimer.singleShot(600, lambda s=sname: self._show_feedback(f"✨ {s}!", PALETTE["accent"]))
+            self._pending_special_feedback = None
+
+        if self._pending_level_up:
+            skill_id, level = self._pending_level_up
+            BUS.level_up.emit(skill_id, level)
+            self._pending_level_up = None
+
+        if self._pending_refresh:
+            self.refresh()
+            self._pending_refresh = False
+
+        if not self._has_pending_work():
+            self._flush_timer.stop()
 
     def _spawn_float(self, text: str, color: str):
         """Spawn a floating text notification centered over this card."""
         win = self.window()
         pt = self.mapTo(win, self.rect().center())
-        FloatingText(text, color, win, cx=pt.x(), cy=pt.y())
+        spawn_floating_text(text, color, win, cx=pt.x(), cy=pt.y())
 
     def _try_unlock(self):
         skill_req = self._node_def.get("skill_req")
@@ -1806,34 +2240,8 @@ class _NodeCard(QWidget):
     def _show_feedback(self, text: str, color: str):
         self._feedback.setText(text)
         self._feedback.setStyleSheet(f"color: {color}; background: transparent; border: none; font-size: 13pt; font-weight: bold;")
-        QTimer.singleShot(1000, lambda: self._feedback.setText(""))
-
-    def _animate_press(self):
-        # Cancel any in-flight bounce and snap back to rest before starting a new one
-        if self._press_anim is not None:
-            self._press_anim.stop()
-            self._press_anim = None
-            if self._sprite_orig_geom is not None:
-                self._sprite_container.setGeometry(self._sprite_orig_geom)
-        # Capture resting geometry once (after first layout pass)
-        if self._sprite_orig_geom is None:
-            self._sprite_orig_geom = QRect(self._sprite_container.geometry())
-        orig = QRect(self._sprite_orig_geom)  # defensive copy
-        anim = QPropertyAnimation(self._sprite_container, b"geometry", self)
-        anim.setDuration(180)
-        anim.setKeyValueAt(0.0,  orig)
-        anim.setKeyValueAt(0.30, QRect(orig.x(), orig.y() - 13, orig.width(), orig.height()))
-        anim.setKeyValueAt(0.65, QRect(orig.x(), orig.y() +  5, orig.width(), orig.height()))
-        anim.setKeyValueAt(1.0,  orig)
-        anim.setEasingCurve(QEasingCurve.OutQuad)
-        # Use identity check so a late-firing callback from a cancelled anim is a no-op
-        def _on_done(_a=anim):
-            if self._press_anim is _a:
-                self._sprite_container.setGeometry(orig)
-                self._press_anim = None
-        anim.finished.connect(_on_done)
-        self._press_anim = anim
-        anim.start()  # no DeleteWhenStopped — self._press_anim owns it
+        # Restart the timer — this cancels any previously scheduled clear
+        self._feedback_timer.start(1000)
 
 
 # ---------------------------------------------------------------------------
@@ -1865,6 +2273,12 @@ class RefinePage(QWidget):
             w = self._swipe._layout.widget(i)
             if isinstance(w, _StationCard):
                 w.refresh()
+
+    def cancel_all_refining(self):
+        for i in range(self._swipe._layout.count()):
+            w = self._swipe._layout.widget(i)
+            if isinstance(w, _StationCard):
+                w.cancel_refining()
 
 
 class _StationCard(QWidget):
@@ -1935,10 +2349,10 @@ class _StationCard(QWidget):
         make_lbl.setStyleSheet(f"color: {PALETTE['text_primary']}; background: transparent; border: none;")
         root.addWidget(make_lbl)
 
-        def _picker_btn(text: str) -> QPushButton:
+        def _picker_btn(text: str, w: int = 58) -> QPushButton:
             b = QPushButton(text)
             b.setFont(scaled_font(FONT_BODY, 18, bold=True))
-            b.setFixedSize(58, 58)
+            b.setFixedSize(w, 58)
             b.setCursor(QCursor(Qt.PointingHandCursor))
             b.setStyleSheet(f"""
                 QPushButton {{
@@ -1951,12 +2365,13 @@ class _StationCard(QWidget):
             """)
             return b
 
-        self._minus_btn = _picker_btn("−")
+        self._minus10_btn = _picker_btn("-10", 68)
+        self._minus_btn   = _picker_btn("−")
         self._spinbox = QSpinBox()
         self._spinbox.setRange(1, 9999)
         self._spinbox.setValue(1)
         self._spinbox.setAlignment(Qt.AlignCenter)
-        self._spinbox.setFixedSize(110, 58)
+        self._spinbox.setFixedSize(90, 58)
         self._spinbox.setFont(scaled_font(FONT_MONO, 18, bold=True))
         self._spinbox.setStyleSheet(f"""
             QSpinBox {{
@@ -1968,7 +2383,8 @@ class _StationCard(QWidget):
             }}
             QSpinBox::up-button, QSpinBox::down-button {{ width: 0; }}
         """)
-        self._plus_btn = _picker_btn("+")
+        self._plus_btn    = _picker_btn("+")
+        self._plus10_btn  = _picker_btn("+10", 68)
         self._max_btn = QPushButton("Max")
         self._max_btn.setFont(scaled_font(FONT_BODY, 12, bold=True))
         self._max_btn.setFixedSize(66, 58)
@@ -1981,19 +2397,23 @@ class _StationCard(QWidget):
             }}
             QPushButton:pressed {{ background: #4EB4A6; }}
         """)
-        # Prevent virtual keyboard on mobile — value changes via ±/Max buttons only
+        # Prevent virtual keyboard on mobile — value changes via buttons only
         self._spinbox.lineEdit().setReadOnly(True)
         self._spinbox.lineEdit().setFocusPolicy(Qt.NoFocus)
-        self._minus_btn.clicked.connect(lambda: self._spinbox.setValue(max(1, self._spinbox.value() - 1)))
-        self._plus_btn.clicked.connect(lambda: self._spinbox.setValue(self._spinbox.value() + 1))
+        self._minus10_btn.clicked.connect(lambda: self._spinbox.setValue(max(1, self._spinbox.value() - 10)))
+        self._minus_btn.clicked.connect(  lambda: self._spinbox.setValue(max(1, self._spinbox.value() - 1)))
+        self._plus_btn.clicked.connect(   lambda: self._spinbox.setValue(self._spinbox.value() + 1))
+        self._plus10_btn.clicked.connect( lambda: self._spinbox.setValue(self._spinbox.value() + 10))
         self._max_btn.clicked.connect(self._set_max)
 
         picker_row = QHBoxLayout()
         picker_row.setAlignment(Qt.AlignCenter)
-        picker_row.setSpacing(8)
+        picker_row.setSpacing(6)
+        picker_row.addWidget(self._minus10_btn)
         picker_row.addWidget(self._minus_btn)
         picker_row.addWidget(self._spinbox)
         picker_row.addWidget(self._plus_btn)
+        picker_row.addWidget(self._plus10_btn)
         picker_row.addWidget(self._max_btn)
         root.addLayout(picker_row)
 
@@ -2069,6 +2489,8 @@ class _StationCard(QWidget):
             self._sprite.play()
 
     def refresh(self):
+        if not self.isVisible():
+            return
         recipe = self._station_def["recipe"]
         inv = self._state.inventory.get(recipe["input"], 0)
         in_name = RESOURCES[recipe["input"]]["name"]
@@ -2139,7 +2561,7 @@ class _StationCard(QWidget):
         skill_color = SKILLS.get(skill, {}).get("color", PALETTE["accent"])
         win = self.window()
         pt = self.mapTo(win, self.rect().center())
-        FloatingText(f"+{eff_xp} XP", skill_color, win, cx=pt.x(), cy=pt.y())
+        FloatingText.spawn(f"+{eff_xp} XP", skill_color, win, cx=pt.x(), cy=pt.y())
         if leveled:
             BUS.level_up.emit(skill, self._state.skills[skill].level)
         out_name = RESOURCES[output]["name"]
@@ -2148,13 +2570,27 @@ class _StationCard(QWidget):
         self._refine_btn.setEnabled(True)
         self.refresh()
 
+    def cancel_refining(self):
+        if not self._refining:
+            return
+        self._progress_timer.stop()
+        self._refining = False
+        self._refine_start = 0.0
+        self._refine_duration = 0.0
+        self._refine_amount = 0
+        self._refine_produced = 0
+        self._progress.hide()
+        self._progress.setValue(0)
+        self._status_lbl.setText("Refining cancelled.")
+        self._refine_btn.setEnabled(True)
+
 
 # ---------------------------------------------------------------------------
 # GEODE DIALOG  — animated open + reveal
 # ---------------------------------------------------------------------------
 GEODE_FRAMES_N = 36
 GEODE_W, GEODE_H = 576, 482
-GEODE_DELAY = 3   # ms
+GEODE_DELAY = 12   # ms
 
 class GeodeDialog(QDialog):
     def __init__(self, state: GameState, parent=None):
@@ -2544,6 +2980,8 @@ class ItemsPage(QWidget):
             BUS.level_up.emit("trading", new_trading_level)
 
     def refresh(self):
+        if not self.isVisible():
+            return
         for row in self._res_rows.values():
             row.refresh()
         for row in self._spec_rows.values():
@@ -2902,6 +3340,8 @@ class UpgradesPage(QWidget):
         return lbl
 
     def refresh(self):
+        if not self.isVisible():
+            return
         self._gold_lbl.setText(f"🪙 {self._state.gold:.0f}")
         shards = self._state.special_items.get("runicShard", 0)
         self._shards_lbl.setText(f"{shards} shards")
@@ -3283,6 +3723,7 @@ class PrestigePage(QWidget):
         super().__init__(parent)
         self._state = state
         self.setStyleSheet(f"background: {PALETTE['bg_dark']};")
+        self._selected_prestige_count = 1
         root = QVBoxLayout(self)
         root.setContentsMargins(24, 24, 24, 24)
         root.setSpacing(20)
@@ -3326,8 +3767,55 @@ class PrestigePage(QWidget):
         status_lay.addWidget(self._tier_lbl)
         status_lay.addWidget(self._coins_lbl)
         status_lay.addWidget(self._cost_lbl)
+        self._multi_hint_lbl = QLabel()
+        self._multi_hint_lbl.setFont(scaled_font(FONT_BODY, 10, bold=True))
+        self._multi_hint_lbl.setStyleSheet(f"color: {PALETTE['accent2']}; background: transparent; border: none;")
+        status_lay.addWidget(self._multi_hint_lbl)
         make_shadow(self._status_card, blur=20, color=PALETTE["prestige"], opacity=60)
         root.addWidget(self._status_card)
+
+        # Multi-prestige picker
+        picker = QFrame()
+        picker.setStyleSheet(f"""
+            QFrame {{
+                background: {PALETTE['bg_card']};
+                border: 1px solid {PALETTE['border']};
+                border-radius: 14px;
+            }}
+        """)
+        play = QHBoxLayout(picker)
+        play.setContentsMargins(14, 12, 14, 12)
+        play.setSpacing(10)
+        plbl = QLabel("Prestige Count")
+        plbl.setFont(scaled_font(FONT_BODY, 11, bold=True))
+        plbl.setStyleSheet(f"color: {PALETTE['text_primary']}; background: transparent; border: none;")
+        self._mp_minus_btn = QPushButton("−")
+        self._mp_minus_btn.setFixedSize(42, 42)
+        self._mp_minus_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        self._mp_minus_btn.setStyleSheet(_btn_style(PALETTE["bg_light"], PALETTE["text_primary"], PALETTE["bg_card"]))
+        self._mp_count_lbl = QLabel("1x")
+        self._mp_count_lbl.setAlignment(Qt.AlignCenter)
+        self._mp_count_lbl.setMinimumWidth(54)
+        self._mp_count_lbl.setFont(scaled_font(FONT_MONO, 14, bold=True))
+        self._mp_count_lbl.setStyleSheet(f"color: {PALETTE['prestige']}; background: transparent; border: none;")
+        self._mp_plus_btn = QPushButton("+")
+        self._mp_plus_btn.setFixedSize(42, 42)
+        self._mp_plus_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        self._mp_plus_btn.setStyleSheet(_btn_style(PALETTE["bg_light"], PALETTE["text_primary"], PALETTE["bg_card"]))
+        self._mp_max_btn = QPushButton("Max")
+        self._mp_max_btn.setFixedSize(64, 42)
+        self._mp_max_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        self._mp_max_btn.setStyleSheet(_btn_style(PALETTE["accent2"], PALETTE["bg_dark"], "#4EB4A6"))
+        self._mp_minus_btn.clicked.connect(lambda: self._adjust_prestige_count(-1))
+        self._mp_plus_btn.clicked.connect(lambda: self._adjust_prestige_count(1))
+        self._mp_max_btn.clicked.connect(self._select_max_prestige)
+        play.addWidget(plbl)
+        play.addStretch()
+        play.addWidget(self._mp_minus_btn)
+        play.addWidget(self._mp_count_lbl)
+        play.addWidget(self._mp_plus_btn)
+        play.addWidget(self._mp_max_btn)
+        root.addWidget(picker)
 
         # Prestige button
         self._prestige_btn = QPushButton("✦ Prestige Now")
@@ -3343,16 +3831,13 @@ class PrestigePage(QWidget):
         coin_title.setStyleSheet(f"color: {PALETTE['text_primary']}; background: transparent; border: none;")
         root.addWidget(coin_title)
 
-        for bonus_id, label, desc in [
-            ("resource_gain", "⛏ Resource Gain", "+5% resource yield per stack"),
-            ("gold_gain",     "🪙 Gold Gain",     "+10% gold from selling per stack"),
-            ("xp_gain",       "⬆ XP Gain",        "+10% XP from all actions per stack"),
-        ]:
-            row = self._make_coin_row(bonus_id, label, desc)
+        for bonus in PRESTIGE_BONUS_DEFS:
+            row = self._make_coin_row(bonus["id"], bonus["label"], bonus["desc"])
             root.addWidget(row)
 
         root.addStretch()
         BUS.gold_changed.connect(self.refresh)
+        BUS.prestige_changed.connect(self.refresh)
         self.refresh()
 
     def _make_coin_row(self, bonus_id: str, label: str, desc: str) -> QFrame:
@@ -3405,7 +3890,7 @@ class PrestigePage(QWidget):
 
         def spend(bid=bonus_id, sl=stacks_lbl):
             if self._state.spend_prestige_coin(bid):
-                BUS.gold_changed.emit()
+                BUS.prestige_changed.emit()
                 sl.setText(str(self._state.prestige_bonuses[bid]))
 
         btn.clicked.connect(spend)
@@ -3421,14 +3906,32 @@ class PrestigePage(QWidget):
         return frame
 
     def refresh(self):
+        if not self.isVisible():
+            return
         tier = self._state.prestige_tier
         coins = self._state.prestige_coins
-        cost = self._state.prestige_cost()
-        can = self._state.can_prestige()
+        max_count = max(1, self._state.max_consecutive_prestiges())
+        self._selected_prestige_count = max(1, min(self._selected_prestige_count, max_count))
+        cost = self._state.total_prestige_cost(self._selected_prestige_count)
+        can = self._state.gold >= cost and self._selected_prestige_count > 0
         self._tier_lbl.setText(f"Prestige Tier: {tier}")
         self._coins_lbl.setText(f"Prestige Coins: {coins} 💜")
-        self._cost_lbl.setText(f"Next prestige costs {cost:,}🪙  (you have {int(self._state.gold):,}🪙)")
+        self._cost_lbl.setText(
+            f"{self._selected_prestige_count}x prestige costs {cost:,}🪙  (you have {int(self._state.gold):,}🪙)"
+        )
+        can_multi = self._state.max_consecutive_prestiges()
+        if can_multi > 1:
+            self._multi_hint_lbl.setText(f"You can chain {can_multi} prestiges right now.")
+        elif can_multi == 1:
+            self._multi_hint_lbl.setText("You can afford 1 prestige right now.")
+        else:
+            self._multi_hint_lbl.setText("Earn more gold to reach the next prestige threshold.")
+        self._mp_count_lbl.setText(f"{self._selected_prestige_count}x")
+        self._mp_minus_btn.setEnabled(self._selected_prestige_count > 1)
+        self._mp_plus_btn.setEnabled(self._selected_prestige_count < max_count)
+        self._mp_max_btn.setEnabled(max_count > 1)
         self._prestige_btn.setEnabled(can)
+        self._prestige_btn.setText(f"✦ Prestige {self._selected_prestige_count}x")
         self._prestige_btn.setStyleSheet(f"""
             QPushButton {{
                 background: {'#9040D0' if can else PALETTE['text_dim']};
@@ -3446,18 +3949,30 @@ class PrestigePage(QWidget):
             frame._stacks_lbl.setText(str(self._state.prestige_bonuses.get(bid, 0)))
             frame._btn.setEnabled(coins > 0)
 
+    def _adjust_prestige_count(self, delta: int):
+        max_count = max(1, self._state.max_consecutive_prestiges())
+        self._selected_prestige_count = max(1, min(self._selected_prestige_count + delta, max_count))
+        self.refresh()
+
+    def _select_max_prestige(self):
+        self._selected_prestige_count = max(1, self._state.max_consecutive_prestiges())
+        self.refresh()
+
     def _do_prestige(self):
-        cost = self._state.prestige_cost()
+        count = max(1, self._selected_prestige_count)
+        cost = self._state.total_prestige_cost(count)
         reply = QMessageBox.question(
             self, "Confirm Prestige",
-            f"Spend {cost:,}🪙 to prestige?\nThis resets gold, skills, inventory, and upgrades.\nYou'll gain 1 Prestige Coin.",
+            f"Spend {cost:,}🪙 to prestige {count} time(s)?\n"
+            f"This resets gold, skills, inventory, active refining, and upgrades.\n"
+            f"You'll gain {count} Prestige Coin{'s' if count != 1 else ''}.",
             QMessageBox.Yes | QMessageBox.No
         )
         if reply == QMessageBox.Yes:
-            if self._state.do_prestige():
-                BUS.gold_changed.emit()
-                BUS.inventory_changed.emit()
-                self.refresh()
+            win = self.window()
+            if hasattr(win, "execute_prestige"):
+                win.execute_prestige(count)
+
 
 
 # ---------------------------------------------------------------------------
@@ -3531,10 +4046,31 @@ class MainWindow(QMainWindow):
         BUS.refine_complete.connect(lambda sid, amt: self._toast.show_message(f"✓ Refined {amt} items!", PALETTE["accent2"]))
         BUS.node_hit.connect(lambda nid, success: None)
         BUS.gold_changed.connect(self._header._refresh)
-        BUS.xp_changed.connect(lambda s, x: self._upgrades_page.refresh())
+        BUS.xp_changed.connect(lambda s, x: self._refresh_upgrades_page())
         BUS.level_up.connect(self._show_level_up_toast)
         BUS.gold_delta.connect(self._spawn_gold_float)
         BUS.shard_delta.connect(self._spawn_shard_float)
+
+    def _refresh_upgrades_page(self):
+        if self._stack.currentWidget() is self._upgrades_page:
+            self._upgrades_page.refresh()
+
+    def execute_prestige(self, count: int):
+        count = max(1, min(count, self._state.max_consecutive_prestiges()))
+        if count <= 0:
+            return False
+        self._refine_page.cancel_all_refining()
+        if not self._state.do_prestige(count):
+            return False
+        BUS.gold_changed.emit()
+        BUS.inventory_changed.emit()
+        BUS.prestige_changed.emit()
+        self._gather_page.refresh()
+        self._refine_page.refresh()
+        self._items_page.refresh()
+        self._upgrades_page.refresh()
+        self._prestige_page.refresh()
+        return True
 
     def _switch_page(self, idx: int):
         self._stack.setCurrentIndex(idx)
@@ -3562,7 +4098,7 @@ class MainWindow(QMainWindow):
     def _spawn_gold_float(self, delta: float):
         text = f"+{int(delta):,}\U0001fa99" if delta > 0 else f"{int(delta):,}\U0001fa99"
         color = PALETTE["gold"] if delta > 0 else PALETTE["danger"]
-        FloatingText(text, color, self, cx=self.width() // 2, cy=100)
+        spawn_floating_text(text, color, self, cx=self.width() // 2, cy=100)
 
     def _spawn_shard_float(self, delta: int):
         if delta > 0:
@@ -3570,7 +4106,7 @@ class MainWindow(QMainWindow):
         else:
             text = f"{delta} shards"
         color = PALETTE["accent2"] if delta > 0 else PALETTE["danger"]
-        FloatingText(text, color, self, cx=self.width() // 2, cy=100)
+        spawn_floating_text(text, color, self, cx=self.width() // 2, cy=100)
 
     def closeEvent(self, event):
         self._state.save()
@@ -3642,6 +4178,13 @@ def main():
             padding: 4px 8px;
         }}
     """)
+
+    # Initialise audio AFTER QApplication so Qt multimedia objects are valid
+    global AUDIO
+    AUDIO = AudioManager()
+    cfg_audio = load_config()
+    AUDIO.set_sfx_volume(cfg_audio.get("sfx_volume", 0.8))
+    AUDIO.set_music_volume(cfg_audio.get("music_volume", 0.5))
 
     win = MainWindow()
     # Show fullscreen / maximized on mobile-sized screens
