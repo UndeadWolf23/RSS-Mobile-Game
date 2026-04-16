@@ -18,17 +18,17 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QStackedWidget, QScrollArea,
     QSlider, QDialog, QGraphicsOpacityEffect, QSizePolicy,
     QFrame, QGridLayout, QSpinBox, QProgressBar, QGraphicsDropShadowEffect,
-    QLineEdit, QMessageBox
+    QLineEdit, QMessageBox, QScroller, QScrollerProperties
 )
 from PySide6.QtCore import (
     Qt, QTimer, QPropertyAnimation, QEasingCurve, QRect, QSize,
     QParallelAnimationGroup, QSequentialAnimationGroup,
-    Signal, QObject, QPoint, QRectF, QThread, Property
+    Signal, QObject, QPoint, QRectF, QThread, Property, QEvent
 )
 from PySide6.QtGui import (
     QPainter, QPixmap, QColor, QFont, QFontMetrics, QPen, QBrush,
     QLinearGradient, QRadialGradient, QPainterPath, QIcon,
-    QTransform, QCursor, QMovie
+    QTransform, QCursor, QMovie, QFontDatabase
 )
 
 # ---------------------------------------------------------------------------
@@ -38,10 +38,16 @@ BASE_DIR = Path(__file__).parent
 SAVE_FILE   = BASE_DIR / "savegame.json"
 CONFIG_FILE = BASE_DIR / "config.json"
 
+# HTML snippet for embedding the coin image inside QLabel rich text
+_coin_uri = (BASE_DIR / "coin.png").as_uri()
+COIN_HTML = f'<img src="{_coin_uri}" width="32" height="32" style="vertical-align:middle">&nbsp;'
+COIN_SMALL_HTML = f'<img src="{_coin_uri}" width="18" height="18" style="vertical-align:middle">'
+
 # ---------------------------------------------------------------------------
 # UI SCALE  — set in main() from screen detection + user preference
 # ---------------------------------------------------------------------------
 APP_SCALE: float = 1.0   # mutable module-level; updated before any widget is built
+BASE_FONT_SCALE: float = 1.18  # global font size nudge — makes all text larger
 
 def sz(n: int) -> int:
     """Scale a pixel value by APP_SCALE."""
@@ -85,8 +91,8 @@ PALETTE = {
     "prestige":     "#C87FFF",
 }
 
-FONT_TITLE  = "Georgia"
-FONT_BODY   = "Helvetica Neue"
+FONT_TITLE  = "Skranji"
+FONT_BODY   = "Skranji"
 FONT_MONO   = "Courier New"
 
 # ---------------------------------------------------------------------------
@@ -94,38 +100,71 @@ FONT_MONO   = "Courier New"
 # ---------------------------------------------------------------------------
 AUTOSAVE_INTERVAL_MS = 15_000
 
+# Set to True by _do_reset_game() so closeEvent skips save after a reset
+_RESET_PENDING: bool = False
+
 RESOURCES = {
-    "oakLog":    {"name": "Oak Logs",     "sprite": "oakLog.png",    "value": 2,   "xp_skill": "woodChopping"},
-    "ironOre":   {"name": "Iron Ore",     "sprite": "ironOre.png",   "value": 5,   "xp_skill": "ironMining"},
-    "stoneChunk":{"name": "Stone Chunks", "sprite": "stoneChunk.png","value": 3,   "xp_skill": "stoneMining"},
-    "oakPlank":  {"name": "Oak Planks",   "sprite": "oakPlank.png",  "value": 6,   "xp_skill": "woodRefining"},
-    "ironIngot": {"name": "Iron Ingots",  "sprite": "ironIngot.png", "value": 15,  "xp_skill": "ironRefining"},
-    "stoneBrick":{"name": "Stone Bricks", "sprite": "stoneBrick.png","value": 8,   "xp_skill": "stoneRefining"},
+    # --- Tier 1 (base) ---
+    "oakLog":          {"name": "Oak Logs",          "sprite": "oakLog.png",          "value": 2,    "xp_skill": "woodChopping"},
+    "ironOre":         {"name": "Iron Ore",          "sprite": "ironOre.png",         "value": 5,    "xp_skill": "ironMining"},
+    "stoneChunk":      {"name": "Stone Chunks",      "sprite": "stoneChunk.png",      "value": 3,    "xp_skill": "stoneMining"},
+    "oakPlank":        {"name": "Oak Planks",        "sprite": "oakPlank.png",        "value": 6,    "xp_skill": "woodRefining"},
+    "ironIngot":       {"name": "Iron Ingots",       "sprite": "ironIngot.png",       "value": 15,   "xp_skill": "ironRefining"},
+    "stoneBrick":      {"name": "Stone Bricks",      "sprite": "stoneBrick.png",      "value": 8,    "xp_skill": "stoneRefining"},
+    # --- Tier 2 (prestige 1-2) ---
+    "pineLog":         {"name": "Pine Logs",         "sprite": "pineLog.png",         "value": 8,    "xp_skill": "woodChopping",  "prestige_req": 1},
+    "pinePlank":       {"name": "Pine Planks",       "sprite": "pinePlank.png",       "value": 22,   "xp_skill": "woodRefining",  "prestige_req": 1},
+    "amethystChunk":   {"name": "Amethyst Chunks",   "sprite": "amethystChunk.png",   "value": 12,   "xp_skill": "stoneMining",   "prestige_req": 2},
+    "amethystCrystal": {"name": "Amethyst Crystals", "sprite": "amethystCrystal.png", "value": 35,   "xp_skill": "stoneRefining", "prestige_req": 2},
+    "titaniteOre":     {"name": "Titanite Ore",      "sprite": "titaniteOre.png",     "value": 25,   "xp_skill": "ironMining",    "prestige_req": 2},
+    "titaniteIngot":   {"name": "Titanite Ingots",   "sprite": "titaniteIngot.png",   "value": 70,   "xp_skill": "ironRefining",  "prestige_req": 2},
+    # --- Tier 3 (prestige 3-7) ---
+    "spruceLog":       {"name": "Spruce Logs",       "sprite": "spruceLog.png",       "value": 20,   "xp_skill": "woodChopping",  "prestige_req": 3},
+    "sprucePlank":     {"name": "Spruce Planks",     "sprite": "sprucePlank.png",     "value": 55,   "xp_skill": "woodRefining",  "prestige_req": 3},
+    "obsidianChunk":   {"name": "Obsidian Chunks",   "sprite": "obsidianChunk.png",   "value": 40,   "xp_skill": "stoneMining",   "prestige_req": 5},
+    "obsidianCore":    {"name": "Obsidian Cores",    "sprite": "obsidianCore.png",    "value": 110,  "xp_skill": "stoneRefining", "prestige_req": 5},
+    "frosteelOre":     {"name": "Frosteel Ore",      "sprite": "frosteelOre.png",     "value": 60,   "xp_skill": "ironMining",    "prestige_req": 7},
+    "frosteelIngot":   {"name": "Frosteel Ingots",   "sprite": "frosteelIngot.png",   "value": 160,  "xp_skill": "ironRefining",  "prestige_req": 7},
 }
 
 RESOURCE_NODES = {
-    "tree":       {"name": "Oak Tree",     "sprite": "oakTree.png",     "yields": "oakLog",    "base_chance": 0.5, "unlock_cost": 0, "xp_per_hit": 4,  "xp_skill": "woodChopping"},
-    "rock":       {"name": "Rock Deposit", "sprite": "stoneDeposit.png", "yields": "stoneChunk","base_chance": 0.5, "unlock_cost": 0, "xp_per_hit": 4,  "xp_skill": "stoneMining"},
-    "oreDeposit": {"name": "Iron Deposit", "sprite": "ironDeposit.png", "yields": "ironOre",   "base_chance": 0.4, "unlock_cost": 0, "xp_per_hit": 6,  "xp_skill": "ironMining",
-                   "skill_req": ("stoneMining", 10)},
+    # Row 0 — base tier (always accessible or skill-gated)
+    "tree":            {"name": "Oak Tree",        "sprite": "oakTree.png",        "yields": "oakLog",       "base_chance": 0.60, "unlock_cost": 0, "xp_per_hit": 6,  "xp_skill": "woodChopping"},
+    "rock":            {"name": "Rock Deposit",    "sprite": "stoneDeposit.png",  "yields": "stoneChunk",   "base_chance": 0.50, "unlock_cost": 0, "xp_per_hit": 6,  "xp_skill": "stoneMining"},
+    "oreDeposit":      {"name": "Iron Deposit",    "sprite": "ironDeposit.png",   "yields": "ironOre",      "base_chance": 0.40, "unlock_cost": 0, "xp_per_hit": 9,  "xp_skill": "ironMining"},
+    # Row 1 — prestige tier 1-2
+    "pineTree":        {"name": "Pine Tree",        "sprite": "pineTree.png",       "yields": "pineLog",      "base_chance": 0.50, "unlock_cost": 0, "xp_per_hit": 10, "xp_skill": "woodChopping",  "prestige_req": 1},
+    "amethystDeposit": {"name": "Amethyst Vein",   "sprite": "amethystDeposit.png","yields": "amethystChunk","base_chance": 0.45, "unlock_cost": 0, "xp_per_hit": 15, "xp_skill": "stoneMining",   "prestige_req": 2},
+    "titaniteDeposit": {"name": "Titanite Deposit","sprite": "titaniteDeposit.png","yields": "titaniteOre",  "base_chance": 0.40, "unlock_cost": 0, "xp_per_hit": 18, "xp_skill": "ironMining",    "prestige_req": 2},
+    # Row 2 — prestige tier 3-7
+    "spruceTree":      {"name": "Spruce Tree",      "sprite": "spruceTree.png",     "yields": "spruceLog",    "base_chance": 0.50, "unlock_cost": 0, "xp_per_hit": 24, "xp_skill": "woodChopping",  "prestige_req": 3},
+    "obsidianDeposit": {"name": "Obsidian Vein",   "sprite": "obsidianDeposit.png","yields": "obsidianChunk","base_chance": 0.40, "unlock_cost": 0, "xp_per_hit": 36, "xp_skill": "stoneMining",   "prestige_req": 5},
+    "frosteelDeposit": {"name": "Frosteel Deposit","sprite": "frosteelDeposit.png","yields": "frosteelOre",  "base_chance": 0.35, "unlock_cost": 0, "xp_per_hit": 48, "xp_skill": "ironMining",    "prestige_req": 7},
 }
 
+# 3×3 navigation grid: row 0 = base, row 1 = prestige 1-2, row 2 = prestige 3-7.
+# Swipe left/right = navigate columns. Swipe up/down = navigate rows.
+RESOURCE_NODE_GRID = [
+    ["tree",       "rock",            "oreDeposit"],       # row 0 — base
+    ["pineTree",   "amethystDeposit", "titaniteDeposit"],  # row 1 — prestige 1-2
+    ["spruceTree", "obsidianDeposit", "frosteelDeposit"],  # row 2 — prestige 3-7
+]
+
 REFINING_STATIONS = {
+    # --- Tier 1 base stations ---
     "sawmill": {
         "name": "Sawmill",
         "sprite": "sawmill.png",
         "frames": 36, "frame_w": 640, "frame_h": 640,
         "frame_delay": 100,
         "recipe": {"input": "oakLog", "output": "oakPlank", "ratio": 2, "time_per_unit": 3.0},
-        "xp_skill": "woodRefining", "xp_per_output": 8,
-    },
-    "forge": {
-        "name": "Forge",
-        "sprite": "forge.png",
-        "frames": 16, "frame_w": 414, "frame_h": 508,
-        "frame_delay": 100,
-        "recipe": {"input": "ironOre", "output": "ironIngot", "ratio": 2, "time_per_unit": 5.0},
-        "xp_skill": "ironRefining", "xp_per_output": 12,
+        "recipes": [
+            {"label": "Oak",    "input": "oakLog",    "output": "oakPlank",    "ratio": 2, "time_per_unit": 3.0, "prestige_req": 0, "xp_per_output": 12},
+            {"label": "Pine",   "input": "pineLog",   "output": "pinePlank",   "ratio": 2, "time_per_unit": 3.5, "prestige_req": 1, "xp_per_output": 18},
+            {"label": "Spruce", "input": "spruceLog", "output": "sprucePlank", "ratio": 2, "time_per_unit": 4.0, "prestige_req": 3, "xp_per_output": 28},
+        ],
+        "xp_skill": "woodRefining", "xp_per_output": 12,
+        "tool_id": "sawmill_tool",
     },
     "masonBench": {
         "name": "Mason Bench",
@@ -133,7 +172,27 @@ REFINING_STATIONS = {
         "frames": 1, "frame_w": 256, "frame_h": 256,
         "frame_delay": 0,
         "recipe": {"input": "stoneChunk", "output": "stoneBrick", "ratio": 2, "time_per_unit": 4.0},
-        "xp_skill": "stoneRefining", "xp_per_output": 8,
+        "recipes": [
+            {"label": "Stone",    "input": "stoneChunk",    "output": "stoneBrick",     "ratio": 2, "time_per_unit": 4.0, "prestige_req": 0, "xp_per_output": 12},
+            {"label": "Amethyst", "input": "amethystChunk", "output": "amethystCrystal", "ratio": 2, "time_per_unit": 5.0, "prestige_req": 2, "xp_per_output": 22},
+            {"label": "Obsidian", "input": "obsidianChunk", "output": "obsidianCore",    "ratio": 2, "time_per_unit": 6.0, "prestige_req": 5, "xp_per_output": 38},
+        ],
+        "xp_skill": "stoneRefining", "xp_per_output": 12,
+        "tool_id": "mason_bench",
+    },
+    "forge": {
+        "name": "Forge",
+        "sprite": "forge.png",
+        "frames": 16, "frame_w": 414, "frame_h": 508,
+        "frame_delay": 100,
+        "recipe": {"input": "ironOre", "output": "ironIngot", "ratio": 2, "time_per_unit": 5.0},
+        "recipes": [
+            {"label": "Iron",     "input": "ironOre",     "output": "ironIngot",     "ratio": 2, "time_per_unit": 5.0, "prestige_req": 0, "xp_per_output": 18},
+            {"label": "Titanite", "input": "titaniteOre", "output": "titaniteIngot",  "ratio": 2, "time_per_unit": 6.5, "prestige_req": 2, "xp_per_output": 28},
+            {"label": "Frosteel", "input": "frosteelOre", "output": "frosteelIngot",  "ratio": 2, "time_per_unit": 8.0, "prestige_req": 7, "xp_per_output": 48},
+        ],
+        "xp_skill": "ironRefining", "xp_per_output": 18,
+        "tool_id": "forge_tool",
     },
 }
 
@@ -155,27 +214,25 @@ TOOL_UPGRADES = [
     {
         "id": "axe",      "name": "Axe",            "icon": "🪓",
         "sprite": "axeT{tier}.png",  # tiered: axeT1.png – axeT10.png
-        "desc": "Better axes increase wood gathered per click and chopping odds.",
+        "desc": "Better axes add +1 resource per tier on each successful chop.",
         "base_cost": 60,  "cost_mult": 2.2, "max_tier": 10,
-        "gather_delta": 0.10,   # +10% gather amount per tier
-        "chance_delta": 0.03,   # +3% base chance per tier
+        "gather_flat": 1,       # +1 resource per tier (flat)
         "node": "tree",
     },
     {
         "id": "pickaxe",  "name": "Pickaxe",         "icon": "⛏",
         "sprite": "pickaxeT{tier}.png",  # tiered: pickaxeT1.png – pickaxeT10.png
-        "desc": "Better pickaxes improve stone/ore output and mining success.",
+        "desc": "Better pickaxes add +1 resource per tier on each successful mine.",
         "base_cost": 80,  "cost_mult": 2.2, "max_tier": 10,
-        "gather_delta": 0.10,
-        "chance_delta": 0.03,
+        "gather_flat": 1,       # +1 resource per tier (flat)
         "node": "rock",           # applies to rock and oreDeposit
     },
     {
         "id": "merchant_stall", "name": "Merchant Stall", "icon": "🏪",
         "sprite": "marketStall.png",  # static
-        "desc": "Better stalls increase sell price of all goods.",
+        "desc": "Better stalls greatly increase sell price of all goods. +15% per tier.",
         "base_cost": 150, "cost_mult": 2.2, "max_tier": 10,
-        "sell_delta": 0.08,       # +8% sell multiplier per tier
+        "sell_delta": 0.15,       # +15% sell multiplier per tier
         "node": None,
     },
     {
@@ -220,7 +277,7 @@ SPECIAL_ITEMS = {
     "diamond":       {"name": "Diamond",         "sprite": "diamond.png",       "value": 500, "sellable": True,  "desc": "The rarest gemstone"},
     # From wood chopping
     "harvestSpirit": {"name": "Harvest Spirit",  "sprite": "harvestSpirit.png", "value": 0,   "sellable": False, "desc": "Consume to boost harvesting for 30s"},
-    "fairyDust":     {"name": "Fairy Dust",      "sprite": "fairyDust.png",     "value": 30,  "sellable": True,  "desc": "Shimmering magical dust"},
+    "fairyDust":     {"name": "Fairy Dust",      "sprite": "fairyDust.png",     "value": 90,  "sellable": True,  "desc": "Shimmering magical dust"},
     # runicShard appears in both mining and chopping drops
 }
 
@@ -322,11 +379,11 @@ SKILL_THRESHOLDS = {
         {"level": 100,"desc": "MAX — +40% refine speed (passive)"},
     ],
     "trading": [
-        {"level":  5, "desc": "+1.5% sell price (passive)"},
-        {"level": 10, "desc": "+3% sell price (passive)"},
-        {"level": 20, "desc": "+6% sell price (passive)"},
-        {"level": 50, "desc": "+15% sell price (passive)"},
-        {"level": 100,"desc": "MAX — +30% sell price (passive)"},
+        {"level":  5, "desc": "+4% sell price (passive)"},
+        {"level": 10, "desc": "+8% sell price (passive)"},
+        {"level": 20, "desc": "+16% sell price (passive)"},
+        {"level": 50, "desc": "+40% sell price (passive)"},
+        {"level": 100,"desc": "MAX — +80% sell price (passive)"},
     ],
 }
 
@@ -335,7 +392,7 @@ HARVEST_SPIRIT_DURATION = 30
 HARVEST_SPIRIT_GATHER_BONUS = 1.5   # 1.5x gather amount
 HARVEST_SPIRIT_CHANCE_BONUS = 0.25  # +25% success chance additive
 
-XP_TABLE = [0] + [int(100 * (lvl ** 1.6)) for lvl in range(1, 100)]
+XP_TABLE = [0] + [int(100 * (lvl ** 1.6)) for lvl in range(1, 101)]
 
 PRESTIGE_BASE_COST = 5000
 PRESTIGE_COST_MULTIPLIER = 1.8
@@ -348,7 +405,7 @@ PRESTIGE_BONUS_DEFS = [
     },
     {
         "id": "gold_gain",
-        "label": "🪙 Gold Gain",
+        "label": "Gold Gain",
         "desc": "+18% gold from selling per stack.",
     },
     {
@@ -389,9 +446,9 @@ def xp_for_level(level: int) -> int:
     return XP_TABLE[min(level, len(XP_TABLE)-1)]
 
 def level_from_xp(xp: int) -> int:
-    for lvl in range(len(XP_TABLE)-1, 0, -1):
+    for lvl in range(99, 0, -1):  # XP_TABLE[99] is the threshold to reach level 100 (max)
         if xp >= XP_TABLE[lvl]:
-            return lvl
+            return lvl + 1
     return 1
 
 # ---------------------------------------------------------------------------
@@ -541,37 +598,26 @@ class GameState:
     # Effective stats — gather
     # ------------------------------------------------------------------
     def get_effective_chance(self, node_id: str) -> float:
-        skill_map = {"tree": "woodChopping", "rock": "stoneMining", "oreDeposit": "ironMining"}
-        skill_id = skill_map.get(node_id, "")
-        base = RESOURCE_NODES[node_id]["base_chance"]
+        node_def = RESOURCE_NODES.get(node_id, {})
+        skill_id = node_def.get("xp_skill", "")
+        base = node_def.get("base_chance", 0.5)
         prestige_bonus = self.prestige_bonuses.get("resource_gain", 0) * 0.12
         skill_bonus = self._skill_level(skill_id) * 0.003 if skill_id else 0.0
-        # Tool bonus (axe for tree; pickaxe for rock/oreDeposit)
-        tool_id = "axe" if node_id == "tree" else "pickaxe"
-        tool_tier = self.tool_tiers.get(tool_id, 0)
-        tool_chance = next((t["chance_delta"] for t in TOOL_UPGRADES if t["id"] == tool_id), 0) * tool_tier
         spirit_bonus = HARVEST_SPIRIT_CHANCE_BONUS if self.spirit_remaining() > 0 else 0.0
-        return min(base + prestige_bonus + skill_bonus + tool_chance + spirit_bonus, 0.97)
+        return min(base + prestige_bonus + skill_bonus + spirit_bonus, 0.97)
 
     def get_effective_gather_amount(self, node_id: str) -> int:
-        """Base amount is 1; tool tiers and runic runes increase it."""
-        skill_map = {"tree": "woodChopping", "rock": "stoneMining", "oreDeposit": "ironMining"}
-        skill_id = skill_map.get(node_id, "")
-        tool_id = "axe" if node_id == "tree" else "pickaxe"
+        """Base amount is 1; tool tiers add a flat +1 per tier; runic runes and prestige increase it."""
+        _wood_skill = RESOURCE_NODES.get(node_id, {}).get("xp_skill", "")
+        tool_id = "axe" if "woodChopping" in _wood_skill else "pickaxe"
         tool_tier = self.tool_tiers.get(tool_id, 0)
-        tool_def = next((t for t in TOOL_UPGRADES if t["id"] == tool_id), {})
-        # Each tier gives +gather_delta fraction; floor to get extra whole items
-        tool_bonus_frac = tool_def.get("gather_delta", 0) * tool_tier
         runic_gather_tier = self.runic_tiers.get("rune_gather", 0)
-        base = 1 + runic_gather_tier + self.prestige_bonuses.get("resource_gain", 0) * 0.10
+        base = 1 + tool_tier + runic_gather_tier + self.prestige_bonuses.get("resource_gain", 0) * 0.10
         spirit_mult = HARVEST_SPIRIT_GATHER_BONUS if self.spirit_remaining() > 0 else 1.0
-        # tool_bonus_frac adds fractional chance for an extra item
-        extra = int(tool_bonus_frac) + (1 if random.random() < (tool_bonus_frac % 1.0) else 0)
-        return max(1, int((base + extra) * spirit_mult))
+        return max(1, int(base * spirit_mult))
 
     def get_crit_chance(self, node_id: str) -> float:
-        skill_map = {"tree": "woodChopping", "rock": "stoneMining", "oreDeposit": "ironMining"}
-        skill_id = skill_map.get(node_id, "")
+        skill_id = RESOURCE_NODES.get(node_id, {}).get("xp_skill", "")
         level = self._skill_level(skill_id) if skill_id else 1
         runic_crit_tier = self.runic_tiers.get("rune_crit", 0)
         base_crit = BASE_CRIT_CHANCE + runic_crit_tier * 0.05 + self.prestige_bonuses.get("crit_boost", 0) * 0.02
@@ -581,8 +627,7 @@ class GameState:
         return CRIT_MULTIPLIER + self.prestige_bonuses.get("crit_boost", 0) * 0.10
 
     def get_special_item_chance(self, node_id: str) -> float:
-        skill_map = {"tree": "woodChopping", "rock": "stoneMining", "oreDeposit": "ironMining"}
-        skill_id = skill_map.get(node_id, "")
+        skill_id = RESOURCE_NODES.get(node_id, {}).get("xp_skill", "")
         level = self._skill_level(skill_id) if skill_id else 1
         prestige_bonus = self.prestige_bonuses.get("special_find", 0) * 0.012
         return min(BASE_SPECIAL_CHANCE + level * SPECIAL_CHANCE_PER_LEVEL + prestige_bonus, 0.45)
@@ -592,8 +637,12 @@ class GameState:
         chance = self.get_special_item_chance(node_id)
         if random.random() >= chance:
             return None
-        is_mining = node_id in ("rock", "oreDeposit")
+        skill_id = RESOURCE_NODES.get(node_id, {}).get("xp_skill", "")
+        is_mining = "Mining" in skill_id
         if is_mining:
+            # Amethyst gets 2× geode chance (0.71 vs 0.55)
+            if node_id == "amethystDeposit":
+                return "geode" if random.random() < 0.71 else "runicShard"
             # Mining: Geode more common than Runic Shard (55/45)
             return "geode" if random.random() < 0.55 else "runicShard"
         else:
@@ -630,7 +679,7 @@ class GameState:
         else:
             base = SPECIAL_ITEMS.get(resource_id, {}).get("value", 0)
         prestige_bonus = 1 + self.prestige_bonuses.get("gold_gain", 0) * 0.18
-        trading_bonus = 1 + self._skill_level("trading") * 0.003
+        trading_bonus = 1 + self._skill_level("trading") * 0.008
         # Merchant stall tool bonus
         stall_tier = self.tool_tiers.get("merchant_stall", 0)
         stall_tool = next((t for t in TOOL_UPGRADES if t["id"] == "merchant_stall"), {})
@@ -644,11 +693,10 @@ class GameState:
     # Effective stats — refine speed
     # ------------------------------------------------------------------
     def get_effective_refine_speed(self, station_id: str) -> float:
-        skill_map = {"sawmill": "woodRefining", "forge": "ironRefining", "masonBench": "stoneRefining"}
-        tool_map = {"sawmill": "sawmill_tool", "forge": "forge_tool", "masonBench": "mason_bench"}
-        skill_id = skill_map.get(station_id, "")
+        station_def = REFINING_STATIONS.get(station_id, {})
+        skill_id = station_def.get("xp_skill", "")
         skill_bonus = self._skill_level(skill_id) * 0.004 if skill_id else 0.0
-        tool_id = tool_map.get(station_id, "")
+        tool_id = station_def.get("tool_id", "")
         tool_tier = self.tool_tiers.get(tool_id, 0)
         tool_def = next((t for t in TOOL_UPGRADES if t["id"] == tool_id), {})
         tool_bonus = tool_def.get("refine_delta", 0) * tool_tier
@@ -700,6 +748,11 @@ class GameState:
             return 0
         return sum(self.prestige_cost_for_tier(self.prestige_tier + offset) for offset in range(count))
 
+    def coins_for_prestige_count(self, count: int) -> int:
+        """Return how many prestige coins are earned for a given prestige count.
+        Scales linearly: the Nth prestige earns N coins (1st=1, 2nd=2, 3rd=3 …)."""
+        return sum(max(1, self.prestige_tier + offset + 1) for offset in range(count))
+
     def do_prestige(self, count: int = 1):
         if count <= 0:
             return False
@@ -713,8 +766,9 @@ class GameState:
         self.special_items = {k: 0 for k in SPECIAL_ITEMS}
         self.tool_tiers.clear()
         # runic_tiers intentionally NOT cleared — permanent
+        earned_coins = self.coins_for_prestige_count(count)
         self.prestige_tier += count
-        self.prestige_coins += count
+        self.prestige_coins += earned_coins
         return True
 
     def spend_prestige_coin(self, bonus_type: str) -> bool:
@@ -725,6 +779,17 @@ class GameState:
         self.prestige_coins -= 1
         self.prestige_bonuses[bonus_type] += 1
         return True
+
+    def spend_prestige_coins(self, bonus_type: str, count: int) -> int:
+        """Spend up to `count` prestige coins on bonus_type. Returns amount spent."""
+        if count <= 0 or bonus_type not in self.prestige_bonuses:
+            return 0
+        actually = min(count, self.prestige_coins)
+        if actually <= 0:
+            return 0
+        self.prestige_coins -= actually
+        self.prestige_bonuses[bonus_type] += actually
+        return actually
 
     # ------------------------------------------------------------------
     # Tool upgrade helpers
@@ -819,7 +884,7 @@ class AudioManager:
     }
 
     def __init__(self):
-        self._sfx_volume: float = 0.8
+        self._sfx_volume: float = 0.35
         self._music_volume: float = 0.5
         self._available: bool = False
         # pools[category][variant_index] = [(QMediaPlayer, QAudioOutput), ...]
@@ -831,10 +896,15 @@ class AudioManager:
         self._drain_timer.setSingleShot(False)
         self._drain_timer.setInterval(15)
         self._drain_timer.timeout.connect(self._drain_requests)
+        # Background music
+        self._bgm_player = None
+        self._bgm_output = None
+        self._bgm_fade_anim = None
         try:
             from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput  # noqa: F401
             self._available = True
             self._load_pools()
+            self._load_bgm()
         except Exception as exc:
             print(f"[Audio] QtMultimedia unavailable: {exc}")
 
@@ -937,6 +1007,37 @@ class AudioManager:
         player.play()
         return True
 
+    def _load_bgm(self) -> None:
+        from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+        from PySide6.QtCore import QUrl
+        path = BASE_DIR / "soundtrack.mp3"
+        if not path.exists():
+            print(f"[Audio] BGM not found: {path}")
+            return
+        try:
+            self._bgm_player = QMediaPlayer()
+            self._bgm_output = QAudioOutput()
+            self._bgm_output.setVolume(0.0)  # silent until start_bgm fades in
+            self._bgm_player.setAudioOutput(self._bgm_output)
+            self._bgm_player.setSource(QUrl.fromLocalFile(str(path)))
+            self._bgm_player.setLoops(QMediaPlayer.Infinite)
+        except Exception as e:
+            print(f"[Audio] BGM load error: {e}")
+            self._bgm_player = None
+            self._bgm_output = None
+
+    def start_bgm(self) -> None:
+        """Start the background music and fade in to the current music volume."""
+        if not self._available or self._bgm_player is None or self._bgm_output is None:
+            return
+        self._bgm_player.play()
+        self._bgm_fade_anim = QPropertyAnimation(self._bgm_output, b"volume")
+        self._bgm_fade_anim.setDuration(2000)
+        self._bgm_fade_anim.setStartValue(0.0)
+        self._bgm_fade_anim.setEndValue(self._music_volume)
+        self._bgm_fade_anim.setEasingCurve(QEasingCurve.InOutQuad)
+        self._bgm_fade_anim.start()
+
     def set_sfx_volume(self, v: float) -> None:
         self._sfx_volume = max(0.0, min(1.0, v))
         for variant_pools in self._pools.values():
@@ -946,6 +1047,12 @@ class AudioManager:
 
     def set_music_volume(self, v: float) -> None:
         self._music_volume = max(0.0, min(1.0, v))
+        if self._bgm_output is not None:
+            # If a fade-in is still in progress, stop it and snap to the
+            # user-chosen level immediately.
+            if self._bgm_fade_anim is not None and self._bgm_fade_anim.state() != QPropertyAnimation.Stopped:
+                self._bgm_fade_anim.stop()
+            self._bgm_output.setVolume(self._music_volume)
 
 
 # Placeholder — replaced with a real instance in main() after QApplication exists.
@@ -984,6 +1091,7 @@ class SignalBus(QObject):
     xp_changed = Signal(str, int)      # skill, new_xp
     node_hit = Signal(str, bool)       # node_id, success
     refine_complete = Signal(str, int) # station_id, amount
+    refine_started  = Signal(str, float) # station_id, total_duration_secs
     save_triggered = Signal()
     page_changed = Signal(int)
     spirit_changed = Signal(float)     # seconds_remaining (0 = expired)
@@ -1016,10 +1124,52 @@ def make_shadow(widget, blur=24, color="#000000", opacity=180, offset=(0, 4)):
     widget.setGraphicsEffect(eff)
 
 def scaled_font(name: str, pt: float, bold=False, italic=False) -> QFont:
-    f = QFont(name, max(1, int(pt * APP_SCALE)))
+    f = QFont(name, max(1, int(pt * APP_SCALE * BASE_FONT_SCALE)))
     f.setBold(bold)
     f.setItalic(italic)
     return f
+
+
+def fmt_number(n: float) -> str:
+    """Return a compact notation string for large numbers.
+    Examples: 999 -> '999', 1500 -> '1.50K', 12300 -> '12.3K',
+              1_500_000 -> '1.50M', 2_300_000_000 -> '2.30B', etc.
+    """
+    n = float(n)
+    if n < 0:
+        return f"-{fmt_number(-n)}"
+    for threshold, suffix in (
+        (1e15, "Q"), (1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")
+    ):
+        if n >= threshold:
+            val = n / threshold
+            if val >= 100:
+                return f"{int(val)}{suffix}"
+            elif val >= 10:
+                return f"{val:.1f}{suffix}"
+            else:
+                return f"{val:.2f}{suffix}"
+    return f"{int(n):,}"
+
+
+def _setup_touch_scroll(sa: QScrollArea) -> None:
+    """Configure a QScrollArea for touch/drag scrolling with hidden scrollbars."""
+    sa.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    sa.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    QScroller.grabGesture(sa.viewport(), QScroller.ScrollerGestureType.LeftMouseButtonGesture)
+    scroller = QScroller.scroller(sa.viewport())
+    props = scroller.scrollerProperties()
+    props.setScrollMetric(
+        QScrollerProperties.ScrollMetric.VerticalOvershootPolicy,
+        QScrollerProperties.OvershootPolicy.OvershootAlwaysOff,
+    )
+    props.setScrollMetric(
+        QScrollerProperties.ScrollMetric.HorizontalOvershootPolicy,
+        QScrollerProperties.OvershootPolicy.OvershootAlwaysOff,
+    )
+    props.setScrollMetric(QScrollerProperties.ScrollMetric.DragStartDistance, 0.003)
+    props.setScrollMetric(QScrollerProperties.ScrollMetric.DecelerationFactor, 0.2)
+    scroller.setScrollerProperties(props)
 
 
 # ---------------------------------------------------------------------------
@@ -1116,17 +1266,27 @@ def make_placeholder(w: int, h: int, label: str, color: str = "#3A4060") -> QPix
 
 
 # ---------------------------------------------------------------------------
-# SWIPE CONTAINER  (swipe left/right to navigate items)
+# SWIPE CONTAINER  (swipe left/right, and optionally up/down in grid mode)
 # ---------------------------------------------------------------------------
 class SwipeContainer(QWidget):
+    """
+    A paged swipe widget.  When cols=1 (default) it works as a single-row
+    left/right carousel with dot indicators.  When cols>1 items are arranged
+    in a grid (row-major) and both horizontal AND vertical swipes work, with
+    a matching grid of dot indicators.
+    """
     index_changed = Signal(int)
 
-    def __init__(self, parent=None):
+    def __init__(self, cols: int = 1, parent=None):
         super().__init__(parent)
         self._items: list[QWidget] = []
         self._index = 0
+        self._row = 0
+        self._col = 0
+        self._cols = max(1, cols)
+        self._dots_2d: list[list] = []   # [row][col] -> QLabel or None
         self._drag_start: Optional[QPoint] = None
-        self._drag_threshold = 60
+        self._drag_threshold = 55
         self.setMouseTracking(True)
 
         self._layout = QStackedWidget(self)
@@ -1134,14 +1294,21 @@ class SwipeContainer(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(self._layout)
 
-        # dot indicators
+        # Dot indicator bar (grid layout when cols>1, horizontal otherwise)
         self._dot_bar = QWidget(self)
-        self._dot_layout = QHBoxLayout(self._dot_bar)
-        self._dot_layout.setAlignment(Qt.AlignCenter)
-        self._dot_layout.setSpacing(8)
+        if self._cols > 1:
+            self._dot_grid = QGridLayout(self._dot_bar)
+            self._dot_grid.setAlignment(Qt.AlignCenter)
+            self._dot_grid.setHorizontalSpacing(10)
+            self._dot_grid.setVerticalSpacing(4)
+        else:
+            self._dot_grid = QHBoxLayout(self._dot_bar)
+            self._dot_grid.setAlignment(Qt.AlignCenter)
+            self._dot_grid.setSpacing(8)
         outer.addWidget(self._dot_bar)
         outer.setAlignment(self._dot_bar, Qt.AlignHCenter)
 
+    # ------------------------------------------------------------------
     def add_item(self, w: QWidget):
         self._items.append(w)
         self._layout.addWidget(w)
@@ -1152,32 +1319,85 @@ class SwipeContainer(QWidget):
             w = self._items.pop()
             self._layout.removeWidget(w)
             w.deleteLater()
+        self._index = 0
+        self._row = 0
+        self._col = 0
         self._rebuild_dots()
 
+    def _num_rows(self) -> int:
+        if not self._items:
+            return 1
+        return math.ceil(len(self._items) / self._cols)
+
     def _rebuild_dots(self):
-        for i in reversed(range(self._dot_layout.count())):
-            self._dot_layout.itemAt(i).widget().deleteLater()
-        for i in range(len(self._items)):
-            dot = QLabel("●")
-            dot.setFont(scaled_font(FONT_BODY, 8))
-            self._dot_layout.addWidget(dot)
+        # Clear all widgets from the layout
+        while self._dot_grid.count():
+            item = self._dot_grid.takeAt(0)
+            if item and item.widget():
+                item.widget().deleteLater()
+        self._dots_2d = []
+
+        if self._cols > 1:
+            rows = self._num_rows()
+            for r in range(rows):
+                row_dots = []
+                for c in range(self._cols):
+                    idx = r * self._cols + c
+                    dot = QLabel("●")
+                    dot.setFont(scaled_font(FONT_BODY, 14))
+                    dot.setAlignment(Qt.AlignCenter)
+                    if idx < len(self._items):
+                        self._dot_grid.addWidget(dot, r, c)
+                        row_dots.append(dot)
+                    else:
+                        dot.deleteLater()
+                        row_dots.append(None)
+                self._dots_2d.append(row_dots)
+        else:
+            for i in range(len(self._items)):
+                dot = QLabel("●")
+                dot.setFont(scaled_font(FONT_BODY, 24))
+                self._dot_grid.addWidget(dot)
         self._update_dots()
 
     def _update_dots(self):
-        for i in range(self._dot_layout.count()):
-            dot = self._dot_layout.itemAt(i).widget()
-            if dot:
-                active = (i == self._index)
-                dot.setStyleSheet(f"color: {PALETTE['accent'] if active else PALETTE['text_dim']};")
+        if self._cols > 1:
+            for r, row in enumerate(self._dots_2d):
+                for c, dot in enumerate(row):
+                    if dot:
+                        active = (r == self._row and c == self._col)
+                        dot.setStyleSheet(
+                            f"color: {PALETTE['accent'] if active else PALETTE['text_dim']};"
+                        )
+        else:
+            for i in range(self._dot_grid.count()):
+                dot = self._dot_grid.itemAt(i).widget()
+                if dot:
+                    active = (i == self._index)
+                    dot.setStyleSheet(f"color: {PALETTE['accent'] if active else PALETTE['text_dim']};")
 
     def go_to(self, idx: int):
         if not self._items:
             return
-        idx = max(0, min(idx, len(self._items)-1))
+        idx = max(0, min(idx, len(self._items) - 1))
         self._index = idx
+        if self._cols > 1:
+            self._row = idx // self._cols
+            self._col = idx % self._cols
         self._layout.setCurrentIndex(idx)
         self._update_dots()
         self.index_changed.emit(idx)
+
+    def go_to_rc(self, row: int, col: int):
+        """Navigate to a specific (row, col) in grid mode."""
+        if not self._items:
+            return
+        rows = self._num_rows()
+        row = max(0, min(row, rows - 1))
+        col = max(0, min(col, self._cols - 1))
+        idx = row * self._cols + col
+        if idx < len(self._items):
+            self.go_to(idx)
 
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
@@ -1186,13 +1406,28 @@ class SwipeContainer(QWidget):
     def mouseReleaseEvent(self, e):
         if self._drag_start is None:
             return
-        delta = e.position().toPoint().x() - self._drag_start.x()
-        if abs(delta) > self._drag_threshold:
-            if delta < 0:
-                self.go_to(self._index + 1)
-            else:
-                self.go_to(self._index - 1)
+        dx = e.position().toPoint().x() - self._drag_start.x()
+        dy = e.position().toPoint().y() - self._drag_start.y()
         self._drag_start = None
+
+        if self._cols > 1 and abs(dy) > abs(dx) and abs(dy) > self._drag_threshold:
+            # Vertical swipe — navigate rows
+            if dy < 0:
+                self.go_to_rc(self._row + 1, self._col)
+            else:
+                self.go_to_rc(self._row - 1, self._col)
+        elif abs(dx) > self._drag_threshold:
+            # Horizontal swipe — navigate columns
+            if self._cols > 1:
+                if dx < 0:
+                    self.go_to_rc(self._row, self._col + 1)
+                else:
+                    self.go_to_rc(self._row, self._col - 1)
+            else:
+                if dx < 0:
+                    self.go_to(self._index + 1)
+                else:
+                    self.go_to(self._index - 1)
 
 
 # ---------------------------------------------------------------------------
@@ -1253,7 +1488,16 @@ class FloatingText(QLabel):
               cx: int = -1, cy: int = -1) -> None:
         """Acquire an idle instance from the pool (or create one if needed)
         and play the rise animation.  Safe to call at any rate."""
-        pool = cls._pool.setdefault(id(parent), [])
+        pid = id(parent)
+        pool = cls._pool.setdefault(pid, [])
+
+        # Register a one-time cleanup when the parent is destroyed so the
+        # pool dict doesn't hold dead widget references indefinitely.
+        if len(pool) == 0:
+            try:
+                parent.destroyed.connect(lambda: cls._pool.pop(pid, None))
+            except Exception:
+                pass
 
         # Find an idle (hidden) instance
         instance = None
@@ -1440,10 +1684,22 @@ class Toast(QLabel):
         """)
         make_shadow(self, blur=20)
         self.hide()
+        # Persistent effect and animations — never recreated
+        self._eff = QGraphicsOpacityEffect(self)
+        self._eff.setOpacity(0.0)
+        self.setGraphicsEffect(self._eff)
+        self._anim_in = QPropertyAnimation(self._eff, b"opacity", self)
+        self._anim_in.setDuration(250)
+        self._anim_in.setStartValue(0.0)
+        self._anim_in.setEndValue(1.0)
+        self._anim_out = QPropertyAnimation(self._eff, b"opacity", self)
+        self._anim_out.setDuration(400)
+        self._anim_out.setStartValue(1.0)
+        self._anim_out.setEndValue(0.0)
+        self._anim_out.finished.connect(self.hide)
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self._fade_out)
-        self._anim: Optional[QPropertyAnimation] = None
 
     def show_message(self, msg: str, color: str = None):
         self.setText(msg)
@@ -1452,29 +1708,121 @@ class Toast(QLabel):
                 f"color: {PALETTE['accent']}", f"color: {color}"
             ))
         self.adjustSize()
-        # center in parent
         if self.parent():
             pw = self.parent().width()
             self.move((pw - self.width()) // 2, 60)
-        eff = QGraphicsOpacityEffect(self)
-        self.setGraphicsEffect(eff)
+        self._anim_out.stop()
+        self._eff.setOpacity(0.0)
         self.show()
-        anim = QPropertyAnimation(eff, b"opacity")
-        anim.setDuration(250)
-        anim.setStartValue(0)
-        anim.setEndValue(1)
-        anim.start(QPropertyAnimation.DeleteWhenStopped)
+        self._anim_in.start()
         self._timer.start(2000)
 
     def _fade_out(self):
-        eff = QGraphicsOpacityEffect(self)
-        self.setGraphicsEffect(eff)
-        anim = QPropertyAnimation(eff, b"opacity")
-        anim.setDuration(400)
-        anim.setStartValue(1)
-        anim.setEndValue(0)
-        anim.finished.connect(self.hide)
-        anim.start(QPropertyAnimation.DeleteWhenStopped)
+        self._anim_in.stop()
+        self._anim_out.start()
+
+
+# ---------------------------------------------------------------------------
+# REFINE HUD  (live per-station progress shown in the header)
+# ---------------------------------------------------------------------------
+class _RefineHUD(QWidget):
+    """
+    Three-row compact progress display — one row per refining station.
+    Invisible (opacity 0) when nothing is refining; fades in when any
+    station starts and fades back out when all finish.
+    """
+    def __init__(self, state: GameState, parent=None):
+        super().__init__(parent)
+        self._state = state
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self._active: dict = {}  # station_id -> (start_time, duration)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 4, 0, 4)
+        lay.setSpacing(4)
+
+        self._bars: dict = {}  # station_id -> QProgressBar
+        for station_id, station_def in REFINING_STATIONS.items():
+            skill   = station_def.get("xp_skill", "")
+            bar_clr = SKILLS.get(skill, {}).get("color", PALETTE["accent"])
+
+            row_w = QWidget()
+            row_w.setStyleSheet("background: transparent;")
+            row_l = QHBoxLayout(row_w)
+            row_l.setContentsMargins(0, 0, 0, 0)
+            row_l.setSpacing(6)
+
+            icon_lbl = QLabel(SKILLS.get(skill, {}).get("icon", ""))
+            icon_lbl.setFont(scaled_font(FONT_BODY, 11))
+            icon_lbl.setFixedWidth(sz(20))
+            icon_lbl.setStyleSheet("background: transparent; border: none;")
+
+            name_lbl = QLabel(station_def["name"])
+            name_lbl.setFont(scaled_font(FONT_BODY, 9, bold=True))
+            name_lbl.setStyleSheet(f"color: {PALETTE['text_muted']}; background: transparent; border: none;")
+            name_lbl.setFixedWidth(sz(68))
+
+            bar = QProgressBar()
+            bar.setRange(0, 1000)
+            bar.setValue(0)
+            bar.setTextVisible(False)
+            bar.setFixedHeight(sz(5))
+            bar.setStyleSheet(f"""
+                QProgressBar {{ background: rgba(255,255,255,18); border: none; border-radius: {sz(2)}px; }}
+                QProgressBar::chunk {{ background: {bar_clr}; border-radius: {sz(2)}px; }}
+            """)
+
+            row_l.addWidget(icon_lbl)
+            row_l.addWidget(name_lbl)
+            row_l.addWidget(bar, stretch=1)
+            lay.addWidget(row_w)
+            self._bars[station_id] = bar
+
+        self.setMinimumWidth(sz(280))
+
+        # Fade effect
+        self._eff = QGraphicsOpacityEffect(self)
+        self._eff.setOpacity(0.0)
+        self.setGraphicsEffect(self._eff)
+        self._anim = QPropertyAnimation(self._eff, b"opacity", self)
+        self._anim.setDuration(400)
+        self._anim.setEasingCurve(QEasingCurve.InOutQuad)
+
+        self._poll = QTimer(self)
+        self._poll.setInterval(80)
+        self._poll.timeout.connect(self._tick)
+
+        BUS.refine_started.connect(self._on_started)
+        BUS.refine_complete.connect(self._on_complete)
+
+    def _on_started(self, station_id: str, duration: float):
+        self._active[station_id] = (time.time(), max(duration, 0.001))
+        if not self._poll.isActive():
+            self._poll.start()
+        self._fade_to(1.0)
+
+    def _on_complete(self, station_id: str, _amount: int):
+        self._active.pop(station_id, None)
+        bar = self._bars.get(station_id)
+        if bar:
+            bar.setValue(0)
+        if not self._active:
+            self._poll.stop()
+            self._fade_to(0.0)
+
+    def _tick(self):
+        now = time.time()
+        for sid, (start, dur) in list(self._active.items()):
+            pct = min((now - start) / dur, 1.0)
+            bar = self._bars.get(sid)
+            if bar:
+                bar.setValue(int(pct * 1000))
+
+    def _fade_to(self, target: float):
+        self._anim.stop()
+        self._anim.setStartValue(float(self._eff.opacity()))
+        self._anim.setEndValue(target)
+        self._anim.start()
 
 
 # ---------------------------------------------------------------------------
@@ -1486,59 +1834,104 @@ class HeaderBar(QWidget):
     def __init__(self, state: GameState, parent=None):
         super().__init__(parent)
         self._state = state
-        self.setFixedHeight(64)
+        self.setFixedHeight(sz(88))
         self.setStyleSheet(f"background: {PALETTE['bg_mid']}; border-bottom: 1px solid {PALETTE['border']};")
 
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(20, 0, 20, 0)
+        lay.setContentsMargins(16, 0, 16, 0)
 
-        # Title
-        title = QLabel("⚒ CraftIdle")
-        title.setFont(scaled_font(FONT_TITLE, 18, bold=True))
-        title.setStyleSheet(f"color: {PALETTE['accent']}; background: transparent; border: none;")
+        # Dynamic refining HUD (replaces static title)
+        self._refine_hud = _RefineHUD(state, self)
 
-        # Gold
-        self._gold_lbl = AnimatedNumber(state.gold, fmt="🪙 {:.0f}")
-        self._gold_lbl.setFont(scaled_font(FONT_BODY, 13, bold=True))
+        # Gold — compound widget: coin icon + animated number
+        _gold_widget = QWidget()
+        _gold_widget.setStyleSheet("background: transparent;")
+        _gold_hlay = QHBoxLayout(_gold_widget)
+        _gold_hlay.setContentsMargins(0, 0, 0, 0)
+        _gold_hlay.setSpacing(5)
+        _coin_icon_lbl = QLabel()
+        _coin_icon_lbl.setStyleSheet("background: transparent; border: none;")
+        _coin_px = load_image("coin.png")
+        if _coin_px:
+            _coin_icon_lbl.setPixmap(_coin_px.scaled(sz(56), sz(56), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        _gold_hlay.addWidget(_coin_icon_lbl)
+        self._gold_lbl = AnimatedNumber(state.gold, fmt="{:.0f}")
+        self._gold_lbl.setFont(scaled_font(FONT_BODY, 15, bold=True))
         self._gold_lbl.setStyleSheet(f"color: {PALETTE['gold']}; background: transparent; border: none;")
+        _gold_hlay.addWidget(self._gold_lbl)
+        self._gold_widget = _gold_widget
 
-        # Prestige
-        self._prestige_lbl = QLabel()
-        self._prestige_lbl.setFont(scaled_font(FONT_BODY, 12))
-        self._prestige_lbl.setStyleSheet(f"color: {PALETTE['prestige']}; background: transparent; border: none;")
+        # Prestige composite widget (image icon + tier text + coin image + count)
+        self._prestige_widget = QWidget()
+        self._prestige_widget.setStyleSheet("background: transparent;")
+        _pw_lay = QHBoxLayout(self._prestige_widget)
+        _pw_lay.setContentsMargins(0, 0, 0, 0)
+        _pw_lay.setSpacing(4)
+        self._prestige_icon_lbl = QLabel()
+        self._prestige_icon_lbl.setStyleSheet("background: transparent; border: none;")
+        _ppx = load_image("prestigeStatic.png")
+        if _ppx:
+            self._prestige_icon_lbl.setPixmap(_ppx.scaled(sz(42), sz(42), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self._prestige_tier_lbl = QLabel()
+        self._prestige_tier_lbl.setFont(scaled_font(FONT_BODY, 16, bold=True))
+        self._prestige_tier_lbl.setStyleSheet(f"color: {PALETTE['prestige']}; background: transparent; border: none;")
+        self._prestige_coin_icon_lbl = QLabel()
+        self._prestige_coin_icon_lbl.setStyleSheet("background: transparent; border: none;")
+        _cpx = load_image("prestigeCoinStatic.png")
+        if _cpx:
+            self._prestige_coin_icon_lbl.setPixmap(_cpx.scaled(sz(42), sz(42), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self._prestige_coins_count_lbl = QLabel()
+        self._prestige_coins_count_lbl.setFont(scaled_font(FONT_BODY, 16, bold=True))
+        self._prestige_coins_count_lbl.setStyleSheet(f"color: {PALETTE['prestige']}; background: transparent; border: none;")
+        _pw_lay.addWidget(self._prestige_icon_lbl)
+        _pw_lay.addWidget(self._prestige_tier_lbl)
+        _pw_lay.addSpacing(6)
+        _pw_lay.addWidget(self._prestige_coin_icon_lbl)
+        _pw_lay.addWidget(self._prestige_coins_count_lbl)
+        self._prestige_widget.hide()
 
-        # Settings cog
-        cog = QPushButton("⚙")
-        cog.setFont(scaled_font(FONT_BODY, 18))
-        cog.setFixedSize(44, 44)
+        # Settings cog button — uses cog.png if available
+        cog = QPushButton()
+        cog.setFixedSize(sz(72), sz(72))
         cog.setCursor(QCursor(Qt.PointingHandCursor))
         cog.setStyleSheet(f"""
             QPushButton {{
-                background: transparent;
-                color: {PALETTE['text_muted']};
+                background: rgba(255,255,255,12);
                 border: none;
-                border-radius: 22px;
+                border-radius: {sz(36)}px;
             }}
-            QPushButton:hover {{ color: {PALETTE['accent']}; }}
+            QPushButton:hover   {{ background: rgba(255,255,255,22); }}
+            QPushButton:pressed {{ background: rgba(255,255,255,32); }}
         """)
+        _cog_px = load_image("cog.png")
+        if _cog_px:
+            cog.setIcon(QIcon(_cog_px.scaled(sz(52), sz(52), Qt.KeepAspectRatio, Qt.SmoothTransformation)))
+            cog.setIconSize(QSize(sz(52), sz(52)))
+        else:
+            cog.setText("⚙")
+            cog.setFont(scaled_font(FONT_BODY, 28))
         cog.clicked.connect(self.settings_clicked)
 
-        lay.addWidget(title)
+        lay.addWidget(self._refine_hud)
         lay.addStretch()
-        lay.addWidget(self._prestige_lbl)
+        lay.addWidget(self._prestige_widget)
         lay.addSpacing(12)
-        lay.addWidget(self._gold_lbl)
+        lay.addWidget(self._gold_widget)
         lay.addSpacing(8)
         lay.addWidget(cog)
 
         BUS.gold_changed.connect(self._refresh)
+        BUS.prestige_changed.connect(self._refresh)
+        self._refresh()
 
     def _refresh(self):
         self._gold_lbl.set_value(self._state.gold)
         if self._state.prestige_tier > 0:
-            self._prestige_lbl.setText(f"✦ Tier {self._state.prestige_tier}  💜{self._state.prestige_coins}")
+            self._prestige_tier_lbl.setText(f"Tier {self._state.prestige_tier}")
+            self._prestige_coins_count_lbl.setText(str(self._state.prestige_coins))
+            self._prestige_widget.show()
         else:
-            self._prestige_lbl.setText("")
+            self._prestige_widget.hide()
 
 
 # ---------------------------------------------------------------------------
@@ -1548,16 +1941,16 @@ class NavBar(QWidget):
     tab_changed = Signal(int)
 
     TABS = [
-        ("⛏", "Gather"),
-        ("🔥", "Refine"),
-        ("🎒", "Items"),
-        ("⬆", "Upgrades"),
-        ("✦", "Prestige"),
+        ("", "Gather"),
+        ("", "Refine"),
+        ("", "Items"),
+        ("", "Upgrades"),
+        ("", "Prestige"),
     ]
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(80)
+        self.setFixedHeight(sz(144))
         self.setStyleSheet(f"background: {PALETTE['bg_mid']}; border-top: 1px solid {PALETTE['border']};")
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -1565,14 +1958,28 @@ class NavBar(QWidget):
         self._buttons: list[QPushButton] = []
         self._active = 0
         for i, (icon, label) in enumerate(self.TABS):
-            btn = QPushButton(f"{icon}\n{label}")
-            btn.setFont(scaled_font(FONT_BODY, 10))
+            btn = QPushButton(label)
+            btn.setFont(scaled_font(FONT_BODY, 11))
             btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             btn.setCursor(QCursor(Qt.PointingHandCursor))
             btn.setCheckable(True)
             btn.clicked.connect(lambda checked, idx=i: self._select(idx))
             self._buttons.append(btn)
             lay.addWidget(btn)
+        # Set image icons for all tabs
+        _nav_icons = [
+            ("pickaxeT3.png", 0, sz(58)),
+            ("forgeStatic.png", 1, sz(47)),
+            ("items.png", 2, sz(47)),
+            ("upgrades.png", 3, sz(47)),
+            ("prestigeStatic.png", 4, sz(47)),
+        ]
+        for filename, idx, icon_sz in _nav_icons:
+            _px = load_image(filename)
+            if _px:
+                _scaled = _px.scaled(icon_sz, icon_sz, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                self._buttons[idx].setIcon(QIcon(_scaled))
+                self._buttons[idx].setIconSize(QSize(icon_sz, icon_sz))
         self._update_styles()
 
     def _select(self, idx: int):
@@ -1591,7 +1998,7 @@ class NavBar(QWidget):
                     border: none;
                     border-top: 2px solid {'#E8A44A' if active else 'transparent'};
                     font-family: '{FONT_BODY}';
-                    font-size: 9pt;
+                    font-size: {int(17 * APP_SCALE)}pt;
                     padding: 4px;
                 }}
                 QPushButton:hover {{
@@ -1603,87 +2010,232 @@ class NavBar(QWidget):
     def set_active(self, idx: int):
         self._select(idx)
 
+    def paintEvent(self, event):
+        """Paint background then overlay a strong shadow band at the top edge."""
+        super().paintEvent(event)
+        p = QPainter(self)
+        # Strong shadow strip at top — fades downward, making navbar pop from content
+        shadow_h = min(self.height(), sz(36))
+        grad = QLinearGradient(0, 0, 0, shadow_h)
+        grad.setColorAt(0.0, QColor(0, 0, 0, 210))
+        grad.setColorAt(1.0, QColor(0, 0, 0, 0))
+        p.fillRect(QRect(0, 0, self.width(), shadow_h), grad)
+        p.end()
+
 
 # ---------------------------------------------------------------------------
-# SETTINGS DIALOG
+# SETTINGS OVERLAY  (floating card — like the prestige confirm window)
 # ---------------------------------------------------------------------------
-class SettingsDialog(QDialog):
-    def __init__(self, parent=None):
+class SettingsOverlay(QWidget):
+    def __init__(self, state: GameState, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Settings")
-        self.setModal(True)
-        self.setMinimumWidth(360)
-        self.setStyleSheet(f"""
-            QDialog {{
+        self._state = state
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setStyleSheet("background: rgba(0,0,0,0);")
+        self.hide()
+
+        # Full-coverage dim backdrop
+        _backdrop = QWidget(self)
+        _backdrop.setStyleSheet("background: rgba(0,0,0,160); border-radius: 0px;")
+        _backdrop_lay = QVBoxLayout(_backdrop)
+        _backdrop_lay.setContentsMargins(0, 0, 0, 0)
+        _backdrop_lay.setAlignment(Qt.AlignCenter)
+        self._backdrop = _backdrop
+
+        # Centered card — single flat layout, no scroll/button-bar split
+        _card = QFrame(_backdrop)
+        _card.setFixedWidth(sz(390))
+        _card.setStyleSheet(f"""
+            QFrame {{
                 background: {PALETTE['bg_mid']};
-                border: 1px solid {PALETTE['border']};
-                border-radius: 16px;
+                border: 2px solid {PALETTE['border']};
+                border-radius: 20px;
             }}
         """)
-        lay = QVBoxLayout(self)
-        lay.setSpacing(20)
-        lay.setContentsMargins(30, 30, 30, 30)
+        make_shadow(_card, blur=40, color="#000000", opacity=180)
+        lay = QVBoxLayout(_card)
+        lay.setContentsMargins(sz(22), sz(18), sz(22), sz(18))
+        lay.setSpacing(sz(10))
 
-        title = QLabel("⚙ Settings")
-        title.setFont(scaled_font(FONT_TITLE, 16, bold=True))
-        title.setStyleSheet(f"color: {PALETTE['accent']}; border: none; background: transparent;")
-        lay.addWidget(title)
+        # Title + version row
+        _title_row = QHBoxLayout()
+        _title_row.setSpacing(6)
+        title = QLabel("⚙  Settings")
+        title.setFont(scaled_font(FONT_TITLE, 14, bold=True))
+        title.setStyleSheet(f"color: {PALETTE['accent']}; background: transparent; border: none;")
+        _ver_lbl = QLabel("Version 0.6.78 ALPHA")
+        _ver_lbl.setFont(scaled_font(FONT_MONO, 8))
+        _ver_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        _ver_lbl.setStyleSheet(f"color: {PALETTE['text_dim']}; background: transparent; border: none;")
+        _title_row.addWidget(title)
+        _title_row.addStretch()
+        _title_row.addWidget(_ver_lbl)
+        lay.addLayout(_title_row)
 
         init_music = int((AUDIO._music_volume if AUDIO else 0.5) * 100)
         init_sfx   = int((AUDIO._sfx_volume   if AUDIO else 0.8) * 100)
-        self._add_slider(lay, "🎵 Music Volume", 0, 100, init_music,
-                         self._on_music_changed)
-        self._add_slider(lay, "🔊 SFX Volume", 0, 100, init_sfx,
-                         self._on_sfx_changed)
-
-        # UI Scale slider (50 % – 150 %)
+        self._add_slider(lay, "🎵 Music", 0, 100, init_music, self._on_music_changed)
+        self._add_slider(lay, "🔊 SFX",   0, 100, init_sfx,   self._on_sfx_changed)
         cfg = load_config()
         init_scale = int(cfg.get("ui_scale", APP_SCALE) * 100)
-        self._add_slider(lay, "🔍 UI Scale", 50, 150, init_scale,
-                         self._on_scale_changed)
+        self._add_slider(lay, "🔍 UI Scale", 50, 150, init_scale, self._on_scale_changed)
 
         note = QLabel("UI scale change takes effect on next launch.")
-        note.setFont(scaled_font(FONT_BODY, 9))
+        note.setFont(scaled_font(FONT_BODY, 8))
         note.setWordWrap(True)
         note.setStyleSheet(f"color: {PALETTE['text_dim']}; border: none; background: transparent;")
         lay.addWidget(note)
 
-        # Button row: Close | Exit App
-        btn_row = QHBoxLayout()
+        # Special thanks credit (compact horizontal)
+        _credit_frame = QFrame()
+        _credit_frame.setStyleSheet(f"""
+            QFrame {{
+                background: rgba(255,255,255,6);
+                border: 1px solid {PALETTE['border']};
+                border-radius: 8px;
+            }}
+        """)
+        _credit_lay = QHBoxLayout(_credit_frame)
+        _credit_lay.setContentsMargins(10, 6, 10, 6)
+        _credit_lay.setSpacing(6)
+        _credit_hdr = QLabel("Special Thanks to:")
+        _credit_hdr.setFont(scaled_font(FONT_BODY, 8, bold=True))
+        _credit_hdr.setStyleSheet(f"color: {PALETTE['text_muted']}; background: transparent; border: none;")
+        _credit_lbl = QLabel("RPG Music Maker — Travis Savoie")
+        _credit_lbl.setFont(scaled_font(FONT_BODY, 9))
+        _credit_lbl.setStyleSheet(f"color: {PALETTE['text_primary']}; background: transparent; border: none;")
+        _credit_lay.addWidget(_credit_hdr)
+        _credit_lay.addWidget(_credit_lbl)
+        _credit_lay.addStretch()
+        lay.addWidget(_credit_frame)
 
+        debug_gold_btn = QPushButton("Debug: +5,000 Gold")
+        debug_gold_btn.setFont(scaled_font(FONT_BODY, 10, bold=True))
+        debug_gold_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        debug_gold_btn.setFixedHeight(sz(36))
+        debug_gold_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {PALETTE['accent2']};
+                color: {PALETTE['bg_dark']};
+                border: none; border-radius: 8px; padding: 4px;
+            }}
+            QPushButton:hover {{ background: #4EB4A6; }}
+        """)
+        debug_gold_btn.clicked.connect(self._add_debug_gold)
+        lay.addWidget(debug_gold_btn)
+
+        reset_btn = QPushButton("🗑  Reset Game")
+        reset_btn.setFont(scaled_font(FONT_BODY, 10, bold=True))
+        reset_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        reset_btn.setFixedHeight(sz(36))
+        reset_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                color: {PALETTE['danger']};
+                border: 1px solid {PALETTE['danger']};
+                border-radius: 8px; padding: 4px;
+            }}
+            QPushButton:hover {{ background: rgba(232,106,94,18); }}
+        """)
+        lay.addWidget(reset_btn)
+
+        self._reset_confirm = QFrame()
+        self._reset_confirm.setStyleSheet(f"""
+            QFrame {{
+                background: rgba(232,106,94,18);
+                border: 1px solid {PALETTE['danger']};
+                border-radius: 8px;
+            }}
+        """)
+        _rc_lay = QVBoxLayout(self._reset_confirm)
+        _rc_lay.setContentsMargins(10, 8, 10, 8)
+        _rc_lay.setSpacing(6)
+        _warn_lbl = QLabel("⚠  Erase ALL progress? Gold, skills, inventory,\nprestige — everything. There is NO undo.")
+        _warn_lbl.setFont(scaled_font(FONT_BODY, 9, bold=True))
+        _warn_lbl.setWordWrap(True)
+        _warn_lbl.setAlignment(Qt.AlignCenter)
+        _warn_lbl.setStyleSheet(f"color: {PALETTE['danger']}; background: transparent; border: none;")
+        _rc_lay.addWidget(_warn_lbl)
+        _rc_btns = QHBoxLayout()
+        _rc_btns.setSpacing(6)
+        _rc_cancel = QPushButton("Cancel")
+        _rc_cancel.setFont(scaled_font(FONT_BODY, 10))
+        _rc_cancel.setCursor(QCursor(Qt.PointingHandCursor))
+        _rc_cancel.setFixedHeight(sz(32))
+        _rc_cancel.setStyleSheet(f"""
+            QPushButton {{
+                background: {PALETTE['bg_light']};
+                color: {PALETTE['text_primary']};
+                border: 1px solid {PALETTE['border']};
+                border-radius: 6px; padding: 4px;
+            }}
+            QPushButton:hover {{ background: {PALETTE['bg_card']}; }}
+        """)
+        _rc_cancel.clicked.connect(lambda: self._reset_confirm.hide())
+        _rc_go = QPushButton("Yes, Reset Everything")
+        _rc_go.setFont(scaled_font(FONT_BODY, 10, bold=True))
+        _rc_go.setCursor(QCursor(Qt.PointingHandCursor))
+        _rc_go.setFixedHeight(sz(32))
+        _rc_go.setStyleSheet(f"""
+            QPushButton {{
+                background: {PALETTE['danger']};
+                color: white; border: none;
+                border-radius: 6px; padding: 4px;
+            }}
+            QPushButton:hover {{ background: #C05040; }}
+        """)
+        _rc_go.clicked.connect(self._do_reset_game)
+        _rc_btns.addWidget(_rc_cancel)
+        _rc_btns.addWidget(_rc_go)
+        _rc_lay.addLayout(_rc_btns)
+        self._reset_confirm.hide()
+        lay.addWidget(self._reset_confirm)
+        reset_btn.clicked.connect(lambda: self._reset_confirm.setVisible(not self._reset_confirm.isVisible()))
+
+        # Close | Exit — same section, no divider
+        _btn_row = QHBoxLayout()
+        _btn_row.setSpacing(10)
         close = QPushButton("Close")
-        close.setFont(scaled_font(FONT_BODY, 12))
+        close.setFont(scaled_font(FONT_BODY, 11))
+        close.setFixedHeight(sz(40))
         close.setCursor(QCursor(Qt.PointingHandCursor))
         close.setStyleSheet(f"""
             QPushButton {{
                 background: {PALETTE['bg_light']};
                 color: {PALETTE['text_primary']};
                 border: 1px solid {PALETTE['border']};
-                border-radius: 10px;
-                padding: 10px;
+                border-radius: 10px; padding: 6px;
             }}
             QPushButton:hover {{ background: {PALETTE['bg_card']}; }}
         """)
-        close.clicked.connect(self.accept)
-
+        close.clicked.connect(self.hide)
         exit_btn = QPushButton("✕  Exit Game")
-        exit_btn.setFont(scaled_font(FONT_BODY, 12))
+        exit_btn.setFont(scaled_font(FONT_BODY, 11))
+        exit_btn.setFixedHeight(sz(40))
         exit_btn.setCursor(QCursor(Qt.PointingHandCursor))
         exit_btn.setStyleSheet(f"""
             QPushButton {{
                 background: {PALETTE['danger']};
-                color: white;
-                border: none;
-                border-radius: 10px;
-                padding: 10px;
+                color: white; border: none;
+                border-radius: 10px; padding: 6px;
             }}
             QPushButton:hover {{ background: #C05040; }}
         """)
         exit_btn.clicked.connect(QApplication.instance().quit)
+        _btn_row.addWidget(close)
+        _btn_row.addWidget(exit_btn)
+        lay.addLayout(_btn_row)
 
-        btn_row.addWidget(close)
-        btn_row.addWidget(exit_btn)
-        lay.addLayout(btn_row)
+        _backdrop_lay.addWidget(_card)
+
+        _self_lay = QVBoxLayout(self)
+        _self_lay.setContentsMargins(0, 0, 0, 0)
+        _self_lay.addWidget(_backdrop)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self.parent():
+            self.setGeometry(self.parent().rect())
 
     def _on_music_changed(self, value: int):
         v = value / 100
@@ -1705,6 +2257,24 @@ class SettingsDialog(QDialog):
         cfg = load_config()
         cfg["ui_scale"] = value / 100
         save_config(cfg)
+
+    def _add_debug_gold(self):
+        self._state.gold += 5000
+        BUS.gold_changed.emit()
+        BUS.gold_delta.emit(5000.0)
+
+    def _do_reset_game(self):
+        global _RESET_PENDING
+        _RESET_PENDING = True
+        try:
+            if SAVE_FILE.exists():
+                SAVE_FILE.unlink()
+        except Exception:
+            pass
+        # Relaunch so the player immediately gets a fresh game
+        import subprocess
+        subprocess.Popen([sys.executable] + sys.argv)
+        QApplication.instance().quit()
 
     def _add_slider(self, parent_lay, label: str, lo: int, hi: int, val: int, callback):
         row = QHBoxLayout()
@@ -1742,8 +2312,249 @@ class SettingsDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
+# PARALLAX BACKGROUND
+# ---------------------------------------------------------------------------
+class ParallaxBackground(QWidget):
+    """
+    Four-layer parallax background.  Layer 0 (backdrop1.png) is the farthest
+    and moves least; layer 3 (backdrop4.png) is the nearest and moves most.
+
+    Driving the parallax:
+      • call set_drag(dx, dy) while the user is dragging to nudge the offset
+      • call reset_drag()     when the drag ends to spring back to centre
+    An ambient sinusoidal drift is always active on top of the drag offset.
+    All interpolation happens in a 60 fps tick so the motion is silky smooth.
+    """
+
+    # Fraction of the "input offset" applied to each layer (0 = no movement).
+    _FACTORS  = [0.0, 0.15, 0.42, 0.85]
+    # Max drag input in pixels (clamped before multiplying by factor).
+    _MAX_DRAG = 36
+    # Extra canvas padding so scaled layers never expose an edge at max offset.
+    # Must be >= _MAX_DRAG * max(_FACTORS) = 36 * 0.85 ≈ 31 → use 40 for safety.
+    _PAD      = 40
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+
+        # Original (un-scaled) pixmaps
+        self._pixmaps: list[QPixmap] = []
+        for i in range(1, 5):
+            px = load_image(f"backdrop{i}.png")
+            self._pixmaps.append(px if px is not None else QPixmap())
+
+        # Cache of pixmaps scaled to (w + 2*PAD, h + 2*PAD) — rebuilt on resize
+        self._scaled: list[QPixmap] = []
+
+        # Drag-driven target offset (input-space, clamped to ±_MAX_DRAG)
+        self._drag_x: float = 0.0
+        self._drag_y: float = 0.0
+        # Current smoothed offset that chases the target
+        self._cur_x: float = 0.0
+        self._cur_y: float = 0.0
+        # Ambient oscillation phase counter (incremented each tick by ~0.016 s)
+        self._t: float = 0.0
+
+        self._tick_timer = QTimer(self)
+        self._tick_timer.setInterval(16)          # ≈ 60 fps
+        self._tick_timer.timeout.connect(self._tick)
+        self._tick_timer.start()
+
+    # ------------------------------------------------------------------
+    # Public API called by _ParallaxMouseTracker
+    # ------------------------------------------------------------------
+
+    def set_drag(self, dx: float, dy: float) -> None:
+        """Update the drag-driven target offset (clamped)."""
+        m = self._MAX_DRAG
+        self._drag_x = max(-m, min(m, dx))
+        self._drag_y = max(-m, min(m, dy))
+
+    def reset_drag(self) -> None:
+        """Release drag — layers spring back to the ambient centre."""
+        self._drag_x = 0.0
+        self._drag_y = 0.0
+
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
+
+    def _tick(self) -> None:
+        self._t += 0.016
+        # Gentle sinusoidal ambient drift (±4 px on the nearest layer)
+        ambient_x = math.sin(self._t * 0.28) * 4.0
+        ambient_y = math.cos(self._t * 0.18) * 2.0
+        target_x = self._drag_x + ambient_x
+        target_y = self._drag_y + ambient_y
+        # Ease current offset toward target (lerp factor 0.07 ≈ 45 ms half-life)
+        self._cur_x += (target_x - self._cur_x) * 0.07
+        self._cur_y += (target_y - self._cur_y) * 0.07
+        self.update()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._rebuild_cache()
+
+    def _rebuild_cache(self) -> None:
+        w, h = self.width(), self.height()
+        if w == 0 or h == 0:
+            self._scaled = []
+            return
+        pad = self._PAD
+        tw, th = w + pad * 2, h + pad * 2
+        self._scaled = []
+        for px in self._pixmaps:
+            if px.isNull():
+                self._scaled.append(QPixmap())
+            else:
+                self._scaled.append(
+                    px.scaled(tw, th,
+                              Qt.KeepAspectRatioByExpanding,
+                              Qt.SmoothTransformation)
+                )
+
+    def paintEvent(self, event):
+        if not self._scaled:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        w, h = self.width(), self.height()
+        pad = self._PAD
+        # Static vertical nudges per layer (positive = down, negative = up)
+        _NUDGE_Y = [0, 0, -260, 0]
+        for i, spx in enumerate(self._scaled):
+            if spx.isNull():
+                continue
+            factor = self._FACTORS[i]
+            ox = int(self._cur_x * factor)
+            oy = int(self._cur_y * factor)
+            # Centre the oversized layer and apply the parallax shift + static nudge
+            draw_x = (w - spx.width())  // 2 + ox
+            draw_y = (h - spx.height()) // 2 + oy + _NUDGE_Y[i]
+            p.drawPixmap(draw_x, draw_y, spx)
+        # Dark tint over all layers to improve foreground contrast
+        p.fillRect(0, 0, w, h, QColor(0, 0, 0, 110))
+        p.end()
+
+
+class _ParallaxMouseTracker(QObject):
+    """
+    Application-level event filter that drives ParallaxBackground from mouse
+    drag gestures anywhere in the window.  Returns False so it never consumes
+    events — all normal widget interaction is unaffected.
+    """
+
+    def __init__(self, parallax: ParallaxBackground, parent=None):
+        super().__init__(parent)
+        self._parallax = parallax
+        self._origin: Optional[QPoint] = None
+
+    def eventFilter(self, obj, event) -> bool:
+        t = event.type()
+        if t == QEvent.Type.MouseButtonPress:
+            self._origin = event.globalPosition().toPoint()
+        elif t == QEvent.Type.MouseMove and self._origin is not None:
+            delta = event.globalPosition().toPoint() - self._origin
+            self._parallax.set_drag(delta.x() * 0.55, delta.y() * 0.38)
+        elif t == QEvent.Type.MouseButtonRelease:
+            self._origin = None
+            self._parallax.reset_drag()
+        return False   # never consume
+
+
+# ---------------------------------------------------------------------------
 # PAGE: GATHER
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# SNOW PARTICLE EFFECT  — background of GatherPage
+# ---------------------------------------------------------------------------
+class SnowWidget(QWidget):
+    """
+    Lightweight snow particle overlay. Runs at 25 fps using parallel arrays
+    (no per-flake objects). Transparent to mouse events so the gather page
+    works normally underneath.
+    """
+    _COUNT   = 48     # number of snowflakes
+    _TICK_MS = 40     # update interval (~25 fps)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        # Load 18 frames from the 9×9-per-frame spritesheet
+        raw = load_sprite_sheet("snowflake.png", 9, 9, 18)
+        # Pre-scale each frame to three sizes for variety; scale with
+        # SmoothTransformation once up-front so paintEvent stays cheap.
+        self._frames: list[QPixmap] = []
+        sizes = [sz(9), sz(14), sz(18)]
+        for px in raw:
+            for s in sizes:
+                self._frames.append(
+                    px.scaled(s, s, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                )
+        n = self._COUNT
+        self._x   = [0.0] * n
+        self._y   = [0.0] * n
+        self._vy  = [0.0] * n   # fall speed (px/tick)
+        self._vx  = [0.0] * n   # horizontal drift (px/tick)
+        self._fi  = [0]   * n   # frame index into self._frames
+        self._op  = [1.0] * n   # opacity 0.0-1.0
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(self._TICK_MS)
+        self._timer.timeout.connect(self._tick)
+
+    # ------------------------------------------------------------------
+    def _init_flake(self, i: int, full_height: bool = False) -> None:
+        w = max(self.width(), 200)
+        h = max(self.height(), 400)
+        self._x[i]  = random.uniform(0, w)
+        self._y[i]  = random.uniform(0, h) if full_height else random.uniform(-20, 0)
+        self._vy[i] = random.uniform(0.6, 2.2)
+        self._vx[i] = random.uniform(-0.4, 0.4)
+        self._fi[i] = random.randrange(len(self._frames)) if self._frames else 0
+        self._op[i] = random.uniform(0.35, 0.75)
+
+    def showEvent(self, event):
+        for i in range(self._COUNT):
+            self._init_flake(i, full_height=True)
+        self._timer.start()
+
+    def hideEvent(self, event):
+        self._timer.stop()
+
+    # ------------------------------------------------------------------
+    def _tick(self) -> None:
+        w = self.width()
+        h = self.height()
+        if w == 0 or h == 0:
+            return
+        for i in range(self._COUNT):
+            self._y[i] += self._vy[i]
+            self._x[i] += self._vx[i]
+            if self._y[i] > h + 20 or self._x[i] < -20 or self._x[i] > w + 20:
+                self._init_flake(i)
+        self.update()
+
+    # ------------------------------------------------------------------
+    def paintEvent(self, event) -> None:
+        if not self._frames:
+            return
+        p = QPainter(self)
+        for i in range(self._COUNT):
+            fr = self._frames[self._fi[i]]
+            p.setOpacity(self._op[i])
+            p.drawPixmap(
+                int(self._x[i]) - fr.width() // 2,
+                int(self._y[i]) - fr.height() // 2,
+                fr,
+            )
+        p.setOpacity(1.0)
+        p.end()
+
+
 class GatherPage(QWidget):
     def __init__(self, state: GameState, parent=None):
         super().__init__(parent)
@@ -1752,10 +2563,15 @@ class GatherPage(QWidget):
         self._building_ui()
 
     def _building_ui(self):
-        self.setStyleSheet(f"background: {PALETTE['bg_dark']};")
+        self.setStyleSheet("background: transparent;")
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
+
+        # Snow background — kept here for resizeEvent; actual rendering done
+        # by _snow_overlay in MainWindow which paints above all page content.
+        self._snow = SnowWidget(self)
+        self._snow.hide()  # hidden; MainWindow's overlay handles display
 
         title = QLabel("Resource Nodes")
         title.setFont(scaled_font(FONT_TITLE, 15, bold=True))
@@ -1769,7 +2585,7 @@ class GatherPage(QWidget):
         hlay.addWidget(self._spirit_timer)
         root.addLayout(hlay)
 
-        self._swipe = SwipeContainer(self)
+        self._swipe = SwipeContainer(cols=3, parent=self)
         root.addWidget(self._swipe, stretch=1)
 
         self._node_cards: dict[str, "_NodeCard"] = {}
@@ -1778,14 +2594,18 @@ class GatherPage(QWidget):
         BUS.inventory_changed.connect(self._refresh_gold_hint)
         BUS.xp_changed.connect(lambda *_: self.refresh())
         BUS.spirit_changed.connect(lambda rem: self.refresh())
+        BUS.prestige_changed.connect(self.refresh)
 
     def _refresh_nodes(self):
         self._swipe.clear_items()
         self._node_cards.clear()
-        for node_id, node_def in RESOURCE_NODES.items():
-            card = _NodeCard(node_id, node_def, self._state, self._strike_frames, self)
-            self._swipe.add_item(card)
-            self._node_cards[node_id] = card
+        # Add cards in grid row-major order so the 3x3 layout is correct
+        for row in RESOURCE_NODE_GRID:
+            for node_id in row:
+                node_def = RESOURCE_NODES[node_id]
+                card = _NodeCard(node_id, node_def, self._state, self._strike_frames, self)
+                self._swipe.add_item(card)
+                self._node_cards[node_id] = card
 
     def _refresh_gold_hint(self):
         pass  # future: highlight unlockable nodes
@@ -1795,6 +2615,47 @@ class GatherPage(QWidget):
             return
         for card in self._node_cards.values():
             card.refresh()
+
+
+# ---------------------------------------------------------------------------
+# LOCK OVERLAY  — full-card blocked-content widget
+# ---------------------------------------------------------------------------
+class _LockOverlay(QWidget):
+    """
+    Translucent overlay placed on top of a card widget when content is locked
+    behind a prestige tier or tool tier requirement.  Because it covers the
+    entire parent, it absorbs all mouse events so locked content is not
+    interactive.
+    """
+    def __init__(self, message: str, color: str = None, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet("background: rgba(13, 15, 20, 218); border-radius: 0px;")
+        lay = QVBoxLayout(self)
+        lay.setAlignment(Qt.AlignCenter)
+        lay.setSpacing(16)
+        lay.setContentsMargins(24, 24, 24, 24)
+
+        lock_lbl = QLabel()
+        lock_px = load_image("locked.png")
+        if lock_px:
+            lock_lbl.setPixmap(lock_px.scaled(sz(200), sz(200), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        else:
+            lock_lbl.setText("🔒")
+            lock_lbl.setFont(scaled_font(FONT_BODY, 48))
+        lock_lbl.setAlignment(Qt.AlignCenter)
+        lock_lbl.setStyleSheet("background: transparent; border: none;")
+        make_shadow(lock_lbl, blur=90, color="#000000", opacity=255, offset=(0, 8))
+        lay.addWidget(lock_lbl)
+
+        msg_lbl = QLabel(message)
+        msg_lbl.setFont(scaled_font(FONT_TITLE, 38, bold=True))
+        msg_lbl.setAlignment(Qt.AlignCenter)
+        msg_lbl.setWordWrap(True)
+        msg_lbl.setStyleSheet(
+            f"color: {color or PALETTE['prestige']}; background: rgba(0,0,0,180); border-radius: 12px; padding: 8px 18px; border: none;"
+        )
+        make_shadow(msg_lbl, blur=70, color="#000000", opacity=255, offset=(0, 4))
+        lay.addWidget(msg_lbl)
 
 
 # ---------------------------------------------------------------------------
@@ -1865,8 +2726,19 @@ class _BouncingSprite(QWidget):
         if not self._pixmap:
             return
         p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
         x = (self.width()  - self._pixmap.width())  // 2
         y = (self.height() - self._pixmap.height()) // 2 + self._offset_y
+        # Soft circular shadow beneath the sprite
+        cx = self.width() // 2
+        cy = y + self._pixmap.height() - 10
+        rx, ry = int(self._pixmap.width() * 0.45), int(self._pixmap.height() * 0.12)
+        shadow_grad = QRadialGradient(cx, cy, rx)
+        shadow_grad.setColorAt(0.0, QColor(0, 0, 0, 80))
+        shadow_grad.setColorAt(1.0, QColor(0, 0, 0, 0))
+        p.setBrush(shadow_grad)
+        p.setPen(Qt.NoPen)
+        p.drawEllipse(cx - rx, cy - ry, rx * 2, ry * 2)
         p.drawPixmap(x, y, self._pixmap)
 
 
@@ -1880,7 +2752,15 @@ class _NodeCard(QWidget):
         self._node_def = node_def
         self._state = state
         self._strike_frames = strike_frames
-        self._locked = node_id not in state.unlocked_nodes
+        # Prestige-gated nodes bypass the unlock-click mechanic; the _LockOverlay handles visual blocking.
+        _prestige_req = node_def.get("prestige_req", 0)
+        _unlock_cost = node_def.get("unlock_cost", 0)
+        _skill_req = node_def.get("skill_req")
+        if _prestige_req > 0 or (_unlock_cost == 0 and not _skill_req):
+            # Free node or prestige-only-gated — never needs the unlock button
+            self._locked = False
+        else:
+            self._locked = node_id not in state.unlocked_nodes
         self._pending_fx_count: int = 0
         self._pending_sound: Optional[str] = None
         self._pending_inventory_emit = False
@@ -1908,13 +2788,13 @@ class _NodeCard(QWidget):
 
         # Node sprite — custom bouncing widget (layout geometry never changes)
         sprite_px = load_image(self._node_def["sprite"])
-        self._bounce_sprite = _BouncingSprite(250, 250)
+        self._bounce_sprite = _BouncingSprite(sz(499), sz(499))
         if sprite_px:
             self._bounce_sprite.set_pixmap(
-                sprite_px.scaled(200, 200, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                sprite_px.scaled(sz(437), sz(437), Qt.KeepAspectRatio, Qt.SmoothTransformation)
             )
         else:
-            self._bounce_sprite.set_pixmap(make_placeholder(200, 200, self._node_def["name"]))
+            self._bounce_sprite.set_pixmap(make_placeholder(sz(437), sz(437), self._node_def["name"]))
 
         # Strike overlay — child of the bouncing sprite so it moves with it
         strike_w = STRIKE_W * 3
@@ -1931,9 +2811,12 @@ class _NodeCard(QWidget):
 
         # Name
         name_lbl = QLabel(self._node_def["name"])
-        name_lbl.setFont(scaled_font(FONT_TITLE, 17, bold=True))
+        name_lbl.setFont(scaled_font(FONT_TITLE, 20, bold=True))
         name_lbl.setAlignment(Qt.AlignCenter)
         name_lbl.setStyleSheet(f"color: {PALETTE['text_primary']}; background: transparent; border: none;")
+        _shadow_name = QGraphicsDropShadowEffect(name_lbl)
+        _shadow_name.setBlurRadius(18); _shadow_name.setOffset(0, 2); _shadow_name.setColor(QColor(0, 0, 0, 255))
+        name_lbl.setGraphicsEffect(_shadow_name)
         root.addWidget(name_lbl)
 
         # Skill XP bar
@@ -1946,6 +2829,9 @@ class _NodeCard(QWidget):
             self._xp_hdr.setStyleSheet(
                 f"color: {_scolor}; background: transparent; border: none;"
             )
+            _shadow_xp = QGraphicsDropShadowEffect(self._xp_hdr)
+            _shadow_xp.setBlurRadius(16); _shadow_xp.setOffset(0, 1); _shadow_xp.setColor(QColor(0, 0, 0, 240))
+            self._xp_hdr.setGraphicsEffect(_shadow_xp)
             self._xp_bar_node = QProgressBar()
             self._xp_bar_node.setRange(0, 100)
             self._xp_bar_node.setValue(0)
@@ -1956,9 +2842,9 @@ class _NodeCard(QWidget):
                 QProgressBar::chunk {{ background: {_scolor}; border-radius: 3px; }}
             """)
             _xp_wrap = QWidget()
-            _xp_wrap.setStyleSheet("background: transparent;")
+            _xp_wrap.setStyleSheet("background: rgba(0,0,0,135); border-radius: 10px;")
             _xp_wlay = QVBoxLayout(_xp_wrap)
-            _xp_wlay.setContentsMargins(10, 0, 10, 0)
+            _xp_wlay.setContentsMargins(14, 8, 14, 8)
             _xp_wlay.setSpacing(4)
             _xp_wlay.addWidget(self._xp_hdr)
             _xp_wlay.addWidget(self._xp_bar_node)
@@ -1969,15 +2855,21 @@ class _NodeCard(QWidget):
         yields_name = RESOURCES[yields_id]["name"]
         self._chance_lbl = QLabel()
         self._chance_lbl.setAlignment(Qt.AlignCenter)
-        self._chance_lbl.setFont(scaled_font(FONT_BODY, 12))
-        self._chance_lbl.setStyleSheet(f"color: {PALETTE['text_muted']}; background: transparent; border: none;")
+        self._chance_lbl.setFont(scaled_font(FONT_BODY, 13))
+        self._chance_lbl.setStyleSheet(f"color: {PALETTE['text_primary']}; background: rgba(0,0,0,130); border-radius: 10px; padding: 5px 14px; border: none;")
+        _shadow_chance = QGraphicsDropShadowEffect(self._chance_lbl)
+        _shadow_chance.setBlurRadius(18); _shadow_chance.setOffset(0, 1); _shadow_chance.setColor(QColor(0, 0, 0, 240))
+        self._chance_lbl.setGraphicsEffect(_shadow_chance)
         root.addWidget(self._chance_lbl)
 
         # Count
         self._count_lbl = QLabel()
         self._count_lbl.setAlignment(Qt.AlignCenter)
-        self._count_lbl.setFont(scaled_font(FONT_MONO, 22, bold=True))
+        self._count_lbl.setFont(scaled_font(FONT_MONO, 26, bold=True))
         self._count_lbl.setStyleSheet(f"color: {PALETTE['accent2']}; background: transparent; border: none;")
+        _shadow_count = QGraphicsDropShadowEffect(self._count_lbl)
+        _shadow_count.setBlurRadius(8); _shadow_count.setOffset(0, 1); _shadow_count.setColor(QColor(0, 0, 0, 180))
+        self._count_lbl.setGraphicsEffect(_shadow_count)
         root.addWidget(self._count_lbl)
 
         # Feedback label
@@ -2001,7 +2893,7 @@ class _NodeCard(QWidget):
                 skill_name = SKILLS[req_skill_id]["name"]
                 btn_text = f"🔒 {skill_name} Lv {req_lvl}"
             elif unlock_cost > 0:
-                btn_text = f"🔒 Unlock — {unlock_cost}🪙"
+                btn_text = f"🔒 Unlock — {unlock_cost}G"
             else:
                 btn_text = "🔒 Locked"
             self._action_btn = QPushButton(btn_text)
@@ -2010,38 +2902,73 @@ class _NodeCard(QWidget):
             self._action_btn = QPushButton(f"Strike {self._node_def['name']}")
             self._action_btn.clicked.connect(self._on_strike)
 
-        self._action_btn.setFont(scaled_font(FONT_BODY, 13, bold=True))
-        self._action_btn.setFixedHeight(54)
+        self._action_btn.setFont(scaled_font(FONT_BODY, 14, bold=True))
+        self._action_btn.setFixedHeight(sz(88))
         self._action_btn.setCursor(QCursor(Qt.PointingHandCursor))
         self._style_btn()
-        make_shadow(self._action_btn, blur=16, opacity=100)
+        self._btn_shadow = QGraphicsDropShadowEffect(self._action_btn)
+        self._btn_shadow.setBlurRadius(16)
+        self._btn_shadow.setColor(QColor(0, 0, 0, 100))
+        self._btn_shadow.setOffset(0, 4)
+        self._action_btn.setGraphicsEffect(self._btn_shadow)
         root.addWidget(self._action_btn)
 
+        # Prestige lock overlay — covers card when prestige_req > current tier
+        prestige_req = self._node_def.get("prestige_req", 0)
+        if prestige_req > 0:
+            self._prestige_overlay = _LockOverlay(
+                f"Requires Prestige {prestige_req}",
+                PALETTE["prestige"],
+                self,
+            )
+        else:
+            self._prestige_overlay = None
+
         self.refresh()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._prestige_overlay is not None:
+            self._prestige_overlay.setGeometry(0, 0, self.width(), self.height())
+            if self._prestige_overlay.isVisible():
+                self._prestige_overlay.raise_()
+
+    def _update_prestige_lock(self):
+        if self._prestige_overlay is None:
+            return
+        locked = self._node_def.get("prestige_req", 0) > self._state.prestige_tier
+        self._prestige_overlay.setVisible(locked)
+        if locked:
+            self._prestige_overlay.setGeometry(0, 0, self.width(), self.height())
+            self._prestige_overlay.raise_()
 
     def _style_btn(self):
         if self._locked:
             col = PALETTE["text_dim"]
             bg = PALETTE["bg_light"]
+            pressed = PALETTE["bg_card"]
         else:
-            col = PALETTE["bg_dark"]
-            bg = PALETTE["accent"]
+            col = "#E8F4FF"
+            bg = "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #5A9EE0, stop:0.55 #2E6ABE, stop:1 #1A4A96)"
+            pressed = "#0E3272"
         self._action_btn.setStyleSheet(f"""
             QPushButton {{
                 background: {bg};
                 color: {col};
-                border: none;
-                border-radius: 12px;
+                border: 1px solid {'#6AAEDD' if not self._locked else PALETTE['border']};
+                border-radius: 14px;
                 font-family: '{FONT_BODY}';
-                font-size: 13pt;
+                font-size: {int(14 * APP_SCALE)}pt;
                 font-weight: bold;
+                letter-spacing: 1px;
             }}
             QPushButton:pressed {{
-                background: {'#C08030' if not self._locked else PALETTE['bg_card']};
+                background: {pressed};
             }}
         """)
 
     def refresh(self):
+        self._update_prestige_lock()
         yields_id = self._node_def["yields"]
         yields_name = RESOURCES[yields_id]["name"]
         chance = self._state.get_effective_chance(self._node_id)
@@ -2082,9 +3009,27 @@ class _NodeCard(QWidget):
                     f"{icon} {SKILLS[self._skill_id]['name']}  •  Lv {sk.level}"
                     f"  •  {sk.xp_in_level:,}/{sk.xp_needed_for_level:,} XP"
                 )
+        # Gather button tooltip + spirit glow (updated every refresh)
+        if not self._locked:
+            gather_amt = self._state.get_effective_gather_amount(self._node_id)
+            self._action_btn.setToolTip(
+                f"Success: {int(chance*100)}%  •  Gather: +{gather_amt}  •  Crit: {int(crit*100)}%  •  Special: {special*100:.1f}%"
+            )
+            if spirit_rem > 0:
+                self._btn_shadow.setBlurRadius(22)
+                _sc = QColor(PALETTE["success"])
+                _sc.setAlpha(200)
+                self._btn_shadow.setColor(_sc)
+                self._btn_shadow.setOffset(0, 0)
+            else:
+                self._btn_shadow.setBlurRadius(16)
+                self._btn_shadow.setColor(QColor(0, 0, 0, 100))
+                self._btn_shadow.setOffset(0, 4)
 
     def _on_strike(self):
         if self._locked:
+            return
+        if self._prestige_overlay is not None and self._prestige_overlay.isVisible():
             return
         node_def = self._node_def
         sound = "chop" if self._node_id == "tree" else "mine"
@@ -2223,7 +3168,7 @@ class _NodeCard(QWidget):
                 return
         cost = self._node_def["unlock_cost"]
         if cost > 0 and self._state.gold < cost:
-            self._show_feedback(f"Need {cost}🪙", PALETTE["danger"])
+            self._show_feedback(f"Need {cost}G", PALETTE["danger"])
             return
         self._state.gold -= cost
         self._state.unlocked_nodes.append(self._node_id)
@@ -2239,7 +3184,7 @@ class _NodeCard(QWidget):
 
     def _show_feedback(self, text: str, color: str):
         self._feedback.setText(text)
-        self._feedback.setStyleSheet(f"color: {color}; background: transparent; border: none; font-size: 13pt; font-weight: bold;")
+        self._feedback.setStyleSheet(f"color: {color}; background: transparent; border: none; font-size: {int(13 * APP_SCALE)}pt; font-weight: bold;")
         # Restart the timer — this cancels any previously scheduled clear
         self._feedback_timer.start(1000)
 
@@ -2251,7 +3196,7 @@ class RefinePage(QWidget):
     def __init__(self, state: GameState, parent=None):
         super().__init__(parent)
         self._state = state
-        self.setStyleSheet(f"background: {PALETTE['bg_dark']};")
+        self.setStyleSheet("background: transparent;")
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -2261,7 +3206,7 @@ class RefinePage(QWidget):
         title.setStyleSheet(f"color: {PALETTE['text_primary']}; padding: 16px 20px 8px; background: transparent; border: none;")
         root.addWidget(title)
 
-        self._swipe = SwipeContainer(self)
+        self._swipe = SwipeContainer(parent=self)
         root.addWidget(self._swipe, stretch=1)
 
         for station_id, station_def in REFINING_STATIONS.items():
@@ -2293,7 +3238,85 @@ class _StationCard(QWidget):
         self._refine_duration = 0.0
         self._refine_amount = 0
         self._refine_produced = 0
+        self._selected_mat: str = ""   # label of currently selected recipe
+        self._mat_btns: dict = {}      # label -> QPushButton
+        self._active_recipe: Optional[dict] = None  # recipe in progress (for _finish_refine)
         self._setup_ui()
+
+    # ------------------------------------------------------------------
+    # Material selection helpers
+    # ------------------------------------------------------------------
+    def _current_recipe(self) -> dict:
+        """Return the recipe dict that is currently selected."""
+        recipes = self._station_def.get("recipes")
+        if not recipes:
+            return self._station_def["recipe"]
+        unlocked = [r for r in recipes if r.get("prestige_req", 0) <= self._state.prestige_tier]
+        if not unlocked:
+            return recipes[0]
+        for r in unlocked:
+            if r["label"] == self._selected_mat:
+                return r
+        # Fall back to first unlocked if selected material not available
+        self._selected_mat = unlocked[0]["label"]
+        return unlocked[0]
+
+    def _select_material(self, label: str):
+        if self._refining:
+            return
+        self._selected_mat = label
+        self._refresh_material_selector()
+        self._refresh_recipe_display()
+
+    def _refresh_material_selector(self):
+        """Show/style material buttons based on current prestige unlock state."""
+        recipes = self._station_def.get("recipes")
+        if not recipes or not self._mat_btns:
+            return
+        unlocked_labels = {r["label"] for r in recipes if r.get("prestige_req", 0) <= self._state.prestige_tier}
+        if self._selected_mat not in unlocked_labels:
+            first = next((r["label"] for r in recipes if r.get("prestige_req", 0) <= self._state.prestige_tier), "")
+            self._selected_mat = first
+        for label, btn in self._mat_btns.items():
+            if label in unlocked_labels:
+                btn.show()
+                active = (label == self._selected_mat)
+                if active:
+                    btn.setStyleSheet(f"""
+                        QPushButton {{
+                            background: {PALETTE['accent']};
+                            color: {PALETTE['bg_dark']};
+                            border: none;
+                            border-radius: 14px;
+                            font-weight: bold;
+                        }}
+                    """)
+                else:
+                    btn.setStyleSheet(f"""
+                        QPushButton {{
+                            background: {PALETTE['bg_light']};
+                            color: {PALETTE['text_primary']};
+                            border: 1px solid {PALETTE['border']};
+                            border-radius: 14px;
+                        }}
+                        QPushButton:pressed {{ background: {PALETTE['bg_card']}; }}
+                    """)
+            else:
+                btn.hide()
+        self._refresh_recipe_display()
+
+    def _refresh_recipe_display(self):
+        """Update recipe info labels when selection changes."""
+        if not hasattr(self, "_recipe_lbl"):
+            return
+        recipe = self._current_recipe()
+        in_name = RESOURCES[recipe["input"]]["name"]
+        out_name = RESOURCES[recipe["output"]]["name"]
+        self._recipe_lbl.setText(f"{recipe['ratio']} {in_name}  →  1 {out_name}")
+        self._make_lbl.setText(f"Make {out_name}:")
+        self._update_needs()
+        inv = self._state.inventory.get(recipe["input"], 0)
+        self._inventory_lbl.setText(f"Have: {inv:,} {in_name}")
 
     def _setup_ui(self):
         root = QVBoxLayout(self)
@@ -2310,49 +3333,91 @@ class _StationCard(QWidget):
 
         if frames:
             self._sprite = SpriteWidget(frames, fd, loop=True, parent=self)
-            scaled_frames = [f.scaled(200, 200, Qt.KeepAspectRatio, Qt.SmoothTransformation) for f in frames]
+            scaled_frames = [f.scaled(sz(240), sz(240), Qt.KeepAspectRatio, Qt.SmoothTransformation) for f in frames]
             self._sprite.set_frames(scaled_frames, fd)
         else:
             self._sprite = QLabel()
-            self._sprite.setFixedSize(200, 200)
+            self._sprite.setFixedSize(sz(240), sz(240))
             px = load_image(self._station_def["sprite"])
             if px:
-                self._sprite.setPixmap(px.scaled(200, 200, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                self._sprite.setPixmap(px.scaled(sz(240), sz(240), Qt.KeepAspectRatio, Qt.SmoothTransformation))
             else:
-                ph = make_placeholder(200, 200, self._station_def["name"])
+                ph = make_placeholder(sz(240), sz(240), self._station_def["name"])
                 self._sprite.setPixmap(ph)
             self._sprite.setAlignment(Qt.AlignCenter)
 
         root.addWidget(self._sprite, alignment=Qt.AlignCenter)
 
         name_lbl = QLabel(self._station_def["name"])
-        name_lbl.setFont(scaled_font(FONT_TITLE, 16, bold=True))
+        name_lbl.setFont(scaled_font(FONT_TITLE, 19, bold=True))
         name_lbl.setAlignment(Qt.AlignCenter)
         name_lbl.setStyleSheet(f"color: {PALETTE['text_primary']}; background: transparent; border: none;")
+        _shadow_name = QGraphicsDropShadowEffect(name_lbl)
+        _shadow_name.setBlurRadius(18); _shadow_name.setOffset(0, 2); _shadow_name.setColor(QColor(0, 0, 0, 255))
+        name_lbl.setGraphicsEffect(_shadow_name)
         root.addWidget(name_lbl)
 
-        recipe = self._station_def["recipe"]
+        # Material selector — pill buttons, one per recipe, hidden until prestige unlocks
+        _recipes = self._station_def.get("recipes", [])
+        if len(_recipes) > 1:
+            # Initialise selected_mat to first recipe label
+            if not self._selected_mat:
+                self._selected_mat = _recipes[0]["label"]
+            _mat_container = QWidget()
+            _mat_container.setStyleSheet("background: transparent;")
+            _mat_lay = QHBoxLayout(_mat_container)
+            _mat_lay.setContentsMargins(0, 0, 0, 0)
+            _mat_lay.setSpacing(sz(10))
+            _mat_lay.setAlignment(Qt.AlignCenter)
+            for _r in _recipes:
+                _lbl = _r["label"]
+                _btn = QPushButton(_lbl)
+                _btn.setFont(scaled_font(FONT_BODY, 13, bold=True))
+                _btn.setFixedHeight(sz(64))
+                _btn.setMinimumWidth(sz(90))
+                _btn.setCursor(QCursor(Qt.PointingHandCursor))
+                _btn.clicked.connect(lambda _chk=False, _l=_lbl: self._select_material(_l))
+                self._mat_btns[_lbl] = _btn
+                _mat_lay.addWidget(_btn)
+            root.addWidget(_mat_container)
+            # Apply initial styles after buttons are registered
+            self._refresh_material_selector()
+
+        # Resolve starting recipe (after selector initialised)
+        recipe = self._current_recipe()
         in_name = RESOURCES[recipe["input"]]["name"]
         out_name = RESOURCES[recipe["output"]]["name"]
-        recipe_lbl = QLabel(f"{recipe['ratio']} {in_name}  →  1 {out_name}")
-        recipe_lbl.setAlignment(Qt.AlignCenter)
-        recipe_lbl.setFont(scaled_font(FONT_BODY, 12))
-        recipe_lbl.setStyleSheet(f"color: {PALETTE['text_muted']}; background: transparent; border: none;")
-        root.addWidget(recipe_lbl)
 
-        # Touch-friendly output amount picker
-        _recipe = self._station_def["recipe"]
-        _out_name = RESOURCES[_recipe["output"]]["name"]
-        make_lbl = QLabel(f"Make {_out_name}:")
-        make_lbl.setFont(scaled_font(FONT_BODY, 12, bold=True))
-        make_lbl.setAlignment(Qt.AlignCenter)
-        make_lbl.setStyleSheet(f"color: {PALETTE['text_primary']}; background: transparent; border: none;")
-        root.addWidget(make_lbl)
+        # Dark info pill wrapping recipe summary labels
+        _info_wrap = QWidget()
+        _info_wrap.setStyleSheet("background: rgba(0,0,0,130); border-radius: 12px;")
+        _info_wlay = QVBoxLayout(_info_wrap)
+        _info_wlay.setContentsMargins(18, 10, 18, 10)
+        _info_wlay.setSpacing(4)
 
-        def _picker_btn(text: str, w: int = 58) -> QPushButton:
+        self._recipe_lbl = QLabel(f"{recipe['ratio']} {in_name}  →  1 {out_name}")
+        self._recipe_lbl.setAlignment(Qt.AlignCenter)
+        self._recipe_lbl.setFont(scaled_font(FONT_BODY, 12))
+        self._recipe_lbl.setStyleSheet(f"color: {PALETTE['accent2']}; background: transparent; border: none;")
+        _shadow_recipe = QGraphicsDropShadowEffect(self._recipe_lbl)
+        _shadow_recipe.setBlurRadius(12); _shadow_recipe.setOffset(0, 1); _shadow_recipe.setColor(QColor(0, 0, 0, 220))
+        self._recipe_lbl.setGraphicsEffect(_shadow_recipe)
+        _info_wlay.addWidget(self._recipe_lbl)
+
+        self._make_lbl = QLabel(f"Make {out_name}:")
+        self._make_lbl.setFont(scaled_font(FONT_BODY, 12, bold=True))
+        self._make_lbl.setAlignment(Qt.AlignCenter)
+        self._make_lbl.setStyleSheet(f"color: {PALETTE['text_primary']}; background: transparent; border: none;")
+        _shadow_make = QGraphicsDropShadowEffect(self._make_lbl)
+        _shadow_make.setBlurRadius(12); _shadow_make.setOffset(0, 1); _shadow_make.setColor(QColor(0, 0, 0, 200))
+        self._make_lbl.setGraphicsEffect(_shadow_make)
+        _info_wlay.addWidget(self._make_lbl)
+        root.addWidget(_info_wrap)
+
+        def _picker_btn(text: str, w: int = sz(68)) -> QPushButton:
             b = QPushButton(text)
             b.setFont(scaled_font(FONT_BODY, 18, bold=True))
-            b.setFixedSize(w, 58)
+            b.setFixedSize(w, sz(68))
             b.setCursor(QCursor(Qt.PointingHandCursor))
             b.setStyleSheet(f"""
                 QPushButton {{
@@ -2365,13 +3430,13 @@ class _StationCard(QWidget):
             """)
             return b
 
-        self._minus10_btn = _picker_btn("-10", 68)
+        self._minus10_btn = _picker_btn("-10", sz(78))
         self._minus_btn   = _picker_btn("−")
         self._spinbox = QSpinBox()
         self._spinbox.setRange(1, 9999)
         self._spinbox.setValue(1)
         self._spinbox.setAlignment(Qt.AlignCenter)
-        self._spinbox.setFixedSize(90, 58)
+        self._spinbox.setFixedSize(sz(100), sz(68))
         self._spinbox.setFont(scaled_font(FONT_MONO, 18, bold=True))
         self._spinbox.setStyleSheet(f"""
             QSpinBox {{
@@ -2384,10 +3449,11 @@ class _StationCard(QWidget):
             QSpinBox::up-button, QSpinBox::down-button {{ width: 0; }}
         """)
         self._plus_btn    = _picker_btn("+")
-        self._plus10_btn  = _picker_btn("+10", 68)
+        self._plus10_btn  = _picker_btn("+10", sz(78))
+        self._plus100_btn = _picker_btn("+100", sz(90))
         self._max_btn = QPushButton("Max")
-        self._max_btn.setFont(scaled_font(FONT_BODY, 12, bold=True))
-        self._max_btn.setFixedSize(66, 58)
+        self._max_btn.setFont(scaled_font(FONT_BODY, 13, bold=True))
+        self._max_btn.setFixedSize(sz(76), sz(68))
         self._max_btn.setCursor(QCursor(Qt.PointingHandCursor))
         self._max_btn.setStyleSheet(f"""
             QPushButton {{
@@ -2400,20 +3466,24 @@ class _StationCard(QWidget):
         # Prevent virtual keyboard on mobile — value changes via buttons only
         self._spinbox.lineEdit().setReadOnly(True)
         self._spinbox.lineEdit().setFocusPolicy(Qt.NoFocus)
-        self._minus10_btn.clicked.connect(lambda: self._spinbox.setValue(max(1, self._spinbox.value() - 10)))
-        self._minus_btn.clicked.connect(  lambda: self._spinbox.setValue(max(1, self._spinbox.value() - 1)))
-        self._plus_btn.clicked.connect(   lambda: self._spinbox.setValue(self._spinbox.value() + 1))
-        self._plus10_btn.clicked.connect( lambda: self._spinbox.setValue(self._spinbox.value() + 10))
+        self._minus100_btn.clicked.connect(lambda: self._spinbox.setValue(max(1, self._spinbox.value() - 100)))
+        self._minus10_btn.clicked.connect( lambda: self._spinbox.setValue(max(1, self._spinbox.value() - 10)))
+        self._minus_btn.clicked.connect(   lambda: self._spinbox.setValue(max(1, self._spinbox.value() - 1)))
+        self._plus_btn.clicked.connect(    lambda: self._spinbox.setValue(self._spinbox.value() + 1))
+        self._plus10_btn.clicked.connect(  lambda: self._spinbox.setValue(self._spinbox.value() + 10))
+        self._plus100_btn.clicked.connect( lambda: self._spinbox.setValue(self._spinbox.value() + 100))
         self._max_btn.clicked.connect(self._set_max)
 
         picker_row = QHBoxLayout()
         picker_row.setAlignment(Qt.AlignCenter)
         picker_row.setSpacing(6)
+        picker_row.addWidget(self._minus100_btn)
         picker_row.addWidget(self._minus10_btn)
         picker_row.addWidget(self._minus_btn)
         picker_row.addWidget(self._spinbox)
         picker_row.addWidget(self._plus_btn)
         picker_row.addWidget(self._plus10_btn)
+        picker_row.addWidget(self._plus100_btn)
         picker_row.addWidget(self._max_btn)
         root.addLayout(picker_row)
 
@@ -2421,13 +3491,19 @@ class _StationCard(QWidget):
         self._needs_lbl = QLabel()
         self._needs_lbl.setAlignment(Qt.AlignCenter)
         self._needs_lbl.setFont(scaled_font(FONT_BODY, 11, bold=True))
-        self._needs_lbl.setStyleSheet(f"color: {PALETTE['text_muted']}; background: transparent; border: none;")
+        self._needs_lbl.setStyleSheet(f"color: {PALETTE['text_muted']}; background: rgba(0,0,0,110); border-radius: 8px; padding: 4px 12px; border: none;")
+        _shadow_needs = QGraphicsDropShadowEffect(self._needs_lbl)
+        _shadow_needs.setBlurRadius(10); _shadow_needs.setOffset(0, 1); _shadow_needs.setColor(QColor(0, 0, 0, 200))
+        self._needs_lbl.setGraphicsEffect(_shadow_needs)
         root.addWidget(self._needs_lbl)
 
         self._inventory_lbl = QLabel()
         self._inventory_lbl.setAlignment(Qt.AlignCenter)
         self._inventory_lbl.setFont(scaled_font(FONT_BODY, 11))
-        self._inventory_lbl.setStyleSheet(f"color: {PALETTE['text_muted']}; background: transparent; border: none;")
+        self._inventory_lbl.setStyleSheet(f"color: {PALETTE['text_primary']}; background: rgba(0,0,0,110); border-radius: 8px; padding: 4px 12px; border: none;")
+        _shadow_inv = QGraphicsDropShadowEffect(self._inventory_lbl)
+        _shadow_inv.setBlurRadius(10); _shadow_inv.setOffset(0, 1); _shadow_inv.setColor(QColor(0, 0, 0, 200))
+        self._inventory_lbl.setGraphicsEffect(_shadow_inv)
         root.addWidget(self._inventory_lbl)
 
         self._spinbox.valueChanged.connect(self._update_needs)
@@ -2455,13 +3531,16 @@ class _StationCard(QWidget):
 
         self._status_lbl = QLabel("")
         self._status_lbl.setAlignment(Qt.AlignCenter)
-        self._status_lbl.setFont(scaled_font(FONT_BODY, 11))
-        self._status_lbl.setStyleSheet(f"color: {PALETTE['accent']}; background: transparent; border: none;")
+        self._status_lbl.setFont(scaled_font(FONT_BODY, 11, bold=True))
+        self._status_lbl.setStyleSheet(f"color: {PALETTE['accent']}; background: rgba(0,0,0,110); border-radius: 8px; padding: 4px 12px; border: none;")
+        _shadow_status = QGraphicsDropShadowEffect(self._status_lbl)
+        _shadow_status.setBlurRadius(10); _shadow_status.setOffset(0, 1); _shadow_status.setColor(QColor(0, 0, 0, 200))
+        self._status_lbl.setGraphicsEffect(_shadow_status)
         root.addWidget(self._status_lbl)
 
         self._refine_btn = QPushButton("Start Refining")
         self._refine_btn.setFont(scaled_font(FONT_BODY, 13, bold=True))
-        self._refine_btn.setFixedHeight(62)
+        self._refine_btn.setFixedHeight(sz(72))
         self._refine_btn.setCursor(QCursor(Qt.PointingHandCursor))
         self._refine_btn.setStyleSheet(f"""
             QPushButton {{
@@ -2482,40 +3561,75 @@ class _StationCard(QWidget):
         self._progress_timer.timeout.connect(self._update_progress)
 
         BUS.inventory_changed.connect(self.refresh)
+        BUS.gold_changed.connect(self._update_lock)  # tool upgrades deduct gold
+        BUS.prestige_changed.connect(self._refresh_material_selector)
+
+        # Tool-tier lock overlay (visible when required tool tier not reached)
+        tool_tier_req = self._station_def.get("tool_tier_req", 0)
+        if tool_tier_req > 0:
+            tool_name = self._station_def.get("tool_display_name", "Tool")
+            self._lock_overlay = _LockOverlay(
+                f"Requires {tool_name}\nTier {tool_tier_req}",
+                PALETTE["accent"],
+                self,
+            )
+        else:
+            self._lock_overlay = None
+
         self.refresh()
 
         # Start sprite animation
         if isinstance(self._sprite, SpriteWidget):
             self._sprite.play()
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._lock_overlay is not None:
+            self._lock_overlay.setGeometry(0, 0, self.width(), self.height())
+            if self._lock_overlay.isVisible():
+                self._lock_overlay.raise_()
+
+    def _update_lock(self):
+        if self._lock_overlay is None:
+            return
+        tool_id = self._station_def.get("tool_id", "")
+        req = self._station_def.get("tool_tier_req", 0)
+        locked = self._state.get_tool_tier(tool_id) < req
+        self._lock_overlay.setVisible(locked)
+        if locked:
+            self._lock_overlay.setGeometry(0, 0, self.width(), self.height())
+            self._lock_overlay.raise_()
+
     def refresh(self):
+        self._update_lock()
         if not self.isVisible():
             return
-        recipe = self._station_def["recipe"]
+        recipe = self._current_recipe()
         inv = self._state.inventory.get(recipe["input"], 0)
         in_name = RESOURCES[recipe["input"]]["name"]
         self._inventory_lbl.setText(f"Have: {inv:,} {in_name}")
         self._update_needs()
 
     def _set_max(self):
-        recipe = self._station_def["recipe"]
+        recipe = self._current_recipe()
         available = self._state.inventory.get(recipe["input"], 0)
         self._spinbox.setValue(max(1, available // recipe["ratio"]))
 
     def _update_needs(self):
-        recipe = self._station_def["recipe"]
+        recipe = self._current_recipe()
         n = self._spinbox.value()
         needed = n * recipe["ratio"]
         available = self._state.inventory.get(recipe["input"], 0)
         in_name = RESOURCES[recipe["input"]]["name"]
         color = PALETTE["success"] if available >= needed else PALETTE["danger"]
         self._needs_lbl.setText(f"Requires {needed:,} {in_name}")
-        self._needs_lbl.setStyleSheet(f"color: {color}; background: transparent; border: none; font-weight: bold;")
+        self._needs_lbl.setStyleSheet(f"color: {color}; background: rgba(0,0,0,110); border-radius: 8px; padding: 4px 12px; border: none; font-weight: bold;")
 
     def _start_refine(self):
         if self._refining:
             return
-        recipe = self._station_def["recipe"]
+        recipe = self._current_recipe()
+        self._active_recipe = recipe   # snapshot so _finish_refine uses same recipe
         amount = self._spinbox.value()
         needed = amount * recipe["ratio"]
         available = self._state.inventory.get(recipe["input"], 0)
@@ -2529,6 +3643,7 @@ class _StationCard(QWidget):
         self._refine_duration = time_per * amount
         self._refine_start = time.time()
         self._refine_amount = amount
+        BUS.refine_started.emit(self._station_id, self._refine_duration)
         out_name = RESOURCES[recipe["output"]]["name"]
         self._status_lbl.setText(f"Refining {amount} {out_name}…")
         self._refine_btn.setEnabled(False)
@@ -2547,12 +3662,12 @@ class _StationCard(QWidget):
     def _finish_refine(self):
         self._progress_timer.stop()
         self._refining = False
-        recipe = self._station_def["recipe"]
+        recipe = getattr(self, "_active_recipe", None) or self._current_recipe()
         output = recipe["output"]
         amount = self._refine_amount
         self._state.inventory[output] = self._state.inventory.get(output, 0) + amount
         skill = self._station_def["xp_skill"]
-        xp = self._station_def["xp_per_output"] * amount
+        xp = recipe.get("xp_per_output", self._station_def["xp_per_output"]) * amount
         eff_xp, leveled = self._state.add_xp(skill, xp)
         BUS.xp_changed.emit(skill, self._state.skills[skill].xp)
         BUS.inventory_changed.emit()
@@ -2566,6 +3681,7 @@ class _StationCard(QWidget):
             BUS.level_up.emit(skill, self._state.skills[skill].level)
         out_name = RESOURCES[output]["name"]
         self._status_lbl.setText(f"Done! +{amount} {out_name}")
+        self._status_lbl.setStyleSheet(f"color: {PALETTE['success']}; background: rgba(0,0,0,110); border-radius: 8px; padding: 4px 12px; border: none; font-weight: bold;")
         self._progress.hide()
         self._refine_btn.setEnabled(True)
         self.refresh()
@@ -2679,6 +3795,26 @@ class GeodeDialog(QDialog):
         self._continue_btn.clicked.connect(self._on_continue)
         root.addWidget(self._continue_btn)
 
+        # "Open Again" button — visible only at reveal phase when player has more geodes
+        self._open_again_btn = QPushButton("⟳  Open Again")
+        self._open_again_btn.setFont(scaled_font(FONT_BODY, 12, bold=True))
+        self._open_again_btn.setFixedHeight(46)
+        self._open_again_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        self._open_again_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #5A9EE0, stop:0.55 #2E6ABE, stop:1 #1A4A96);
+                color: #E8F4FF;
+                border: 1px solid #6AAEDD;
+                border-radius: 12px;
+                font-weight: bold;
+            }}
+            QPushButton:pressed {{ background: #0E3272; }}
+        """)
+        self._open_again_btn.clicked.connect(self._on_open_again)
+        self._open_again_btn.hide()
+        root.addWidget(self._open_again_btn)
+
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
@@ -2693,6 +3829,7 @@ class GeodeDialog(QDialog):
                 return
             self._phase = "animating"
             self._continue_btn.setEnabled(False)
+            self._open_again_btn.hide()
             self._title.setText("Opening Geode...")
             self._gem_id = self._state.open_geode()
             if self._geode_sprite:
@@ -2702,6 +3839,7 @@ class GeodeDialog(QDialog):
                 self._on_anim_done()
         elif self._phase == "reveal":
             self._phase = "done"
+            self._open_again_btn.hide()
             BUS.inventory_changed.emit()
             self.accept()
 
@@ -2720,9 +3858,29 @@ class GeodeDialog(QDialog):
             else:
                 self._gem_lbl.setPixmap(make_placeholder(200, 200, gem_name))
             self._title.setText("Geode Opened!")
-            self._result_lbl.setText(f"Obtained {gem_name} — click to continue")
+            self._result_lbl.setText(f"Obtained {gem_name}!")
         self._continue_btn.setEnabled(True)
         self._continue_btn.setText("Continue")
+        # Show "Open Again" if player still has geodes
+        remaining = self._state.special_items.get("geode", 0)
+        if remaining >= 1:
+            self._open_again_btn.setText(f"⟳  Open Again  ({remaining} left)")
+            self._open_again_btn.show()
+        else:
+            self._open_again_btn.hide()
+
+    def _on_open_again(self):
+        """Reset dialog state and immediately open another geode."""
+        if self._state.special_items.get("geode", 0) <= 0:
+            self._open_again_btn.hide()
+            return
+        # Reset to idle then trigger open
+        self._phase = "idle"
+        self._open_again_btn.hide()
+        self._gem_lbl.hide()
+        if self._geode_sprite:
+            self._geode_sprite.show()
+        self._on_continue()
 
 
 # ---------------------------------------------------------------------------
@@ -2798,32 +3956,41 @@ class ItemsPage(QWidget):
     def __init__(self, state: GameState, parent=None):
         super().__init__(parent)
         self._state = state
-        self.setStyleSheet(f"background: {PALETTE['bg_dark']};")
+        self.setStyleSheet("background: transparent;")
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
         # ── Header row ──────────────────────────────────────────────────
         hdr = QWidget()
-        hdr.setFixedHeight(52)
-        hdr.setStyleSheet(f"background: {PALETTE['bg_mid']}; border-bottom: 1px solid {PALETTE['border']};")
+        hdr.setFixedHeight(60)
+        hdr.setStyleSheet(f"""
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 {PALETTE['bg_mid']}, stop:1 {PALETTE['bg_dark']});
+            border-bottom: 1px solid {PALETTE['border']};
+        """)
         hlay = QHBoxLayout(hdr)
         hlay.setContentsMargins(16, 0, 16, 0)
         title_lbl = QLabel("Items")
         title_lbl.setFont(scaled_font(FONT_TITLE, 14, bold=True))
         title_lbl.setStyleSheet(f"color: {PALETTE['text_primary']}; background: transparent; border: none;")
-        self._sell_all_btn = QPushButton("🪙 Sell All")
+        self._sell_all_btn = QPushButton("Sell All")
         self._sell_all_btn.setFont(scaled_font(FONT_BODY, 11, bold=True))
-        self._sell_all_btn.setFixedHeight(36)
+        self._sell_all_btn.setFixedHeight(38)
         self._sell_all_btn.setCursor(QCursor(Qt.PointingHandCursor))
         self._sell_all_btn.setStyleSheet(f"""
             QPushButton {{
-                background: {PALETTE['gold']};
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 {PALETTE['gold']}, stop:1 #C8960C);
                 color: {PALETTE['bg_dark']};
-                border: none; border-radius: 10px; padding: 0 16px; font-weight: bold;
+                border: none; border-radius: 12px; padding: 0 18px; font-weight: bold;
             }}
-            QPushButton:pressed {{ background: #D8B030; }}
+            QPushButton:pressed {{ background: #A07800; }}
         """)
+        _sell_coin_px = load_image("coin.png")
+        if _sell_coin_px:
+            self._sell_all_btn.setIcon(QIcon(_sell_coin_px.scaled(sz(22), sz(22), Qt.KeepAspectRatio, Qt.SmoothTransformation)))
+            self._sell_all_btn.setIconSize(QSize(sz(22), sz(22)))
         self._sell_all_btn.clicked.connect(self._sell_all_items)
         hlay.addWidget(title_lbl)
         hlay.addStretch()
@@ -2832,11 +3999,11 @@ class ItemsPage(QWidget):
 
         # ── Tab bar ──────────────────────────────────────────────────────
         tab_bar = QWidget()
-        tab_bar.setFixedHeight(44)
-        tab_bar.setStyleSheet(f"background: {PALETTE['bg_mid']}; border-bottom: 1px solid {PALETTE['border']};")
+        tab_bar.setFixedHeight(52)
+        tab_bar.setStyleSheet(f"background: {PALETTE['bg_dark']}; border-bottom: 1px solid {PALETTE['border']};")
         tlay = QHBoxLayout(tab_bar)
-        tlay.setContentsMargins(12, 0, 12, 0)
-        tlay.setSpacing(0)
+        tlay.setContentsMargins(14, 8, 14, 8)
+        tlay.setSpacing(8)
 
         def _tab_btn(label: str) -> QPushButton:
             b = QPushButton(label)
@@ -2866,6 +4033,7 @@ class ItemsPage(QWidget):
         res_scroll = QScrollArea()
         res_scroll.setWidgetResizable(True)
         res_scroll.setStyleSheet("background: transparent; border: none;")
+        _setup_touch_scroll(res_scroll)
         res_container = QWidget()
         res_container.setStyleSheet("background: transparent;")
         res_vlay = QVBoxLayout(res_container)
@@ -2891,6 +4059,7 @@ class ItemsPage(QWidget):
         spec_scroll = QScrollArea()
         spec_scroll.setWidgetResizable(True)
         spec_scroll.setStyleSheet("background: transparent; border: none;")
+        _setup_touch_scroll(spec_scroll)
         spec_container = QWidget()
         spec_container.setStyleSheet("background: transparent;")
         spec_vlay = QVBoxLayout(spec_container)
@@ -2930,17 +4099,29 @@ class ItemsPage(QWidget):
     def _update_tab_styles(self):
         for btn, active in [(self._tab_resources, self._content.currentIndex() == 0),
                              (self._tab_special,   self._content.currentIndex() == 1)]:
-            btn.setStyleSheet(f"""
-                QPushButton {{
-                    background: {'#252A3D' if active else 'transparent'};
-                    color: {PALETTE['accent'] if active else PALETTE['text_muted']};
-                    border: none;
-                    border-bottom: 2px solid {'#E8A44A' if active else 'transparent'};
-                    font-weight: bold;
-                    border-radius: 0;
-                    padding: 0 8px;
-                }}
-            """)
+            if active:
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background: {PALETTE['accent']};
+                        color: {PALETTE['bg_dark']};
+                        border: none;
+                        border-radius: 14px;
+                        font-weight: bold;
+                        padding: 0 12px;
+                    }}
+                """)
+            else:
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background: {PALETTE['bg_light']};
+                        color: {PALETTE['text_muted']};
+                        border: 1px solid {PALETTE['border']};
+                        border-radius: 14px;
+                        font-weight: bold;
+                        padding: 0 12px;
+                    }}
+                    QPushButton:hover {{ color: {PALETTE['text_primary']}; background: {PALETTE['bg_card']}; }}
+                """)
 
     def _sell_all_items(self):
         old_trading_level = self._state.skills["trading"].level
@@ -3006,40 +4187,53 @@ class _ItemRow(QFrame):
         self._sell_btn: Optional[QPushButton] = None
         self._spin: Optional[QSpinBox] = None
 
-        self.setMinimumHeight(88)
+        self.setMinimumHeight(96)
         self.setStyleSheet(f"""
             QFrame {{
                 background: {PALETTE['bg_card']};
                 border: 1px solid {PALETTE['border']};
-                border-radius: 14px;
+                border-radius: 16px;
             }}
         """)
-        make_shadow(self, blur=10, opacity=80)
+        make_shadow(self, blur=14, opacity=90)
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(14, 12, 14, 12)
-        lay.setSpacing(12)
+        lay.setContentsMargins(0, 0, 14, 0)
+        lay.setSpacing(0)
+
+        # Left accent stripe — colour varies by item type
+        stripe_color = (PALETTE["prestige"] if is_special else
+                        PALETTE["accent2"] if item_id in ("oakLog", "oakPlank") else
+                        PALETTE["accent"] if item_id in ("ironOre", "ironIngot") else
+                        PALETTE["text_muted"])
+        stripe = QFrame()
+        stripe.setFixedWidth(5)
+        stripe.setStyleSheet(f"background: {stripe_color}; border-top-left-radius: 16px; border-bottom-left-radius: 16px; border: none;")
+        lay.addWidget(stripe)
+        lay.addSpacing(12)
 
         # Icon
         px = load_image(sprite)
         icon = QLabel()
-        icon.setFixedSize(48, 48)
+        icon.setFixedSize(sz(54), sz(54))
         if px:
-            icon.setPixmap(px.scaled(48, 48, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            icon.setPixmap(px.scaled(sz(54), sz(54), Qt.KeepAspectRatio, Qt.SmoothTransformation))
         else:
-            ph = make_placeholder(48, 48, item_id[:2].upper())
+            ph = make_placeholder(sz(54), sz(54), item_id[:2].upper())
             icon.setPixmap(ph)
         icon.setStyleSheet("background: transparent; border: none;")
         lay.addWidget(icon)
+        lay.addSpacing(10)
 
         # Info column
         info = QVBoxLayout()
         info.setSpacing(2)
+        info.setContentsMargins(0, 10, 0, 10)
         name_lbl = QLabel(display_name)
-        name_lbl.setFont(scaled_font(FONT_BODY, 11, bold=True))
+        name_lbl.setFont(scaled_font(FONT_BODY, 12, bold=True))
         name_lbl.setStyleSheet(f"color: {PALETTE['text_primary']}; background: transparent; border: none;")
         self._qty_lbl = QLabel()
-        self._qty_lbl.setFont(scaled_font(FONT_MONO, 13, bold=True))
-        self._qty_lbl.setStyleSheet(f"color: {PALETTE['accent']}; background: transparent; border: none;")
+        self._qty_lbl.setFont(scaled_font(FONT_MONO, 14, bold=True))
+        self._qty_lbl.setStyleSheet(f"color: {PALETTE['accent2']}; background: transparent; border: none;")
         self._sub_lbl = QLabel()
         self._sub_lbl.setFont(scaled_font(FONT_BODY, 9))
         self._sub_lbl.setStyleSheet(f"color: {PALETTE['text_muted']}; background: transparent; border: none;")
@@ -3053,7 +4247,7 @@ class _ItemRow(QFrame):
         if not is_special:
             # Resource row: price label + spinbox + All + Sell
             self._price_lbl = QLabel()
-            self._price_lbl.setFont(scaled_font(FONT_MONO, 10))
+            self._price_lbl.setFont(scaled_font(FONT_MONO, 13, bold=True))
             self._price_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             self._price_lbl.setStyleSheet(f"color: {PALETTE['gold']}; background: transparent; border: none;")
             lay.addWidget(self._price_lbl)
@@ -3099,7 +4293,7 @@ class _ItemRow(QFrame):
 
             if sellable:
                 self._price_lbl = QLabel()
-                self._price_lbl.setFont(scaled_font(FONT_MONO, 10))
+                self._price_lbl.setFont(scaled_font(FONT_MONO, 13, bold=True))
                 self._price_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 self._price_lbl.setStyleSheet(f"color: {PALETTE['gold']}; background: transparent; border: none;")
                 lay.addWidget(self._price_lbl)
@@ -3113,7 +4307,7 @@ class _ItemRow(QFrame):
         spin = QSpinBox()
         spin.setRange(1, 99999)
         spin.setValue(1)
-        spin.setFixedWidth(76)
+        spin.setFixedWidth(60)
         spin.setFont(scaled_font(FONT_MONO, 10))
         spin.setStyleSheet(f"""
             QSpinBox {{
@@ -3123,12 +4317,49 @@ class _ItemRow(QFrame):
                 border-radius: 6px;
                 padding: 2px 4px;
             }}
+            QSpinBox::up-button, QSpinBox::down-button {{ width: 0; }}
         """)
+        spin.lineEdit().setReadOnly(True)
+        spin.lineEdit().setFocusPolicy(Qt.NoFocus)
+
+        def _step_btn(text: str) -> QPushButton:
+            b = QPushButton(text)
+            b.setFont(scaled_font(FONT_BODY, 8, bold=True))
+            b.setFixedSize(38, 36)
+            b.setCursor(QCursor(Qt.PointingHandCursor))
+            b.setStyleSheet(f"""
+                QPushButton {{
+                    background: {PALETTE['bg_light']};
+                    color: {PALETTE['text_muted']};
+                    border: 1px solid {PALETTE['border']};
+                    border-radius: 6px;
+                }}
+                QPushButton:pressed {{ background: {PALETTE['bg_card']}; color: {PALETTE['text_primary']}; }}
+            """)
+            return b
+
+        m100 = _step_btn("-100")
+        m10  = _step_btn("-10")
+        m1   = _step_btn("-1")
+        p1   = _step_btn("+1")
+        p10  = _step_btn("+10")
+        p100 = _step_btn("+100")
+        m100.clicked.connect(lambda: spin.setValue(max(1, spin.value() - 100)))
+        m10.clicked.connect( lambda: spin.setValue(max(1, spin.value() - 10)))
+        m1.clicked.connect(  lambda: spin.setValue(max(1, spin.value() - 1)))
+        p1.clicked.connect(  lambda: spin.setValue(spin.value() + 1))
+        p10.clicked.connect( lambda: spin.setValue(spin.value() + 10))
+        p100.clicked.connect(lambda: spin.setValue(spin.value() + 100))
+
+        for w in (m100, m10, m1):
+            lay.addWidget(w)
         lay.addWidget(spin)
+        for w in (p1, p10, p100):
+            lay.addWidget(w)
 
         all_btn = QPushButton("All")
         all_btn.setFont(scaled_font(FONT_BODY, 9))
-        all_btn.setFixedSize(50, 40)
+        all_btn.setFixedSize(44, 36)
         all_btn.setCursor(QCursor(Qt.PointingHandCursor))
         all_btn.setStyleSheet(f"""
             QPushButton {{
@@ -3144,7 +4375,7 @@ class _ItemRow(QFrame):
 
         sell_btn = QPushButton("Sell")
         sell_btn.setFont(scaled_font(FONT_BODY, 10, bold=True))
-        sell_btn.setFixedSize(62, 44)
+        sell_btn.setFixedSize(58, 40)
         sell_btn.setCursor(QCursor(Qt.PointingHandCursor))
         sell_btn.setStyleSheet(f"""
             QPushButton {{
@@ -3172,9 +4403,9 @@ class _ItemRow(QFrame):
 
         if not self._is_special:
             price = self._state.get_effective_sell_price(self._item_id)
-            self._sub_lbl.setText(f"{price:.1f}🪙 each")
+            self._sub_lbl.setText(f"{price:.1f} {COIN_HTML}each")
             if self._price_lbl:
-                self._price_lbl.setText(f"{price:.1f}🪙")
+                self._price_lbl.setText(f"{price:.1f} {COIN_HTML}")
             if self._spin:
                 self._spin.setMaximum(max(1, qty))
             if self._sell_btn:
@@ -3186,7 +4417,7 @@ class _ItemRow(QFrame):
             if self._item_def.get("sellable"):
                 price = self._state.get_effective_sell_price(self._item_id)
                 if self._price_lbl:
-                    self._price_lbl.setText(f"{price:.1f}🪙")
+                    self._price_lbl.setText(f"{price:.1f} {COIN_HTML}")
                 if self._spin:
                     self._spin.setMaximum(max(1, qty))
                 if self._sell_btn:
@@ -3229,6 +4460,110 @@ class _ItemRow(QFrame):
 
 
 # ---------------------------------------------------------------------------
+# SCROLL HINT  — animated chevron overlay for scrollable pages
+# ---------------------------------------------------------------------------
+class _ScrollHint(QWidget):
+    """
+    A small, non-interactive overlay that draws a pulsing/bobbing down-chevron
+    at the bottom of a scroll area to hint that the content is scrollable.
+    Fades away permanently once the user has scrolled a little.
+    """
+    def __init__(self, scroll_area: "QScrollArea", parent: QWidget):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self.setFixedSize(sz(56), sz(48))
+
+        self._eff = QGraphicsOpacityEffect(self)
+        self._eff.setOpacity(0.75)
+        self.setGraphicsEffect(self._eff)
+
+        # Bob animation — two legs (down then up) in a sequential group so the
+        # widget always stays within its intended bounds (no drift on loop).
+        self._bob_down = QPropertyAnimation(self, b"pos", self)
+        self._bob_down.setDuration(450)
+        self._bob_down.setEasingCurve(QEasingCurve.InOutSine)
+        self._bob_up = QPropertyAnimation(self, b"pos", self)
+        self._bob_up.setDuration(450)
+        self._bob_up.setEasingCurve(QEasingCurve.InOutSine)
+        self._bob_grp = QSequentialAnimationGroup(self)
+        self._bob_grp.addAnimation(self._bob_down)
+        self._bob_grp.addAnimation(self._bob_up)
+        self._bob_grp.setLoopCount(-1)  # infinite
+
+        # Fade-out animation — played once when user scrolls
+        self._fade = QPropertyAnimation(self._eff, b"opacity", self)
+        self._fade.setDuration(350)
+        self._fade.setStartValue(0.75)
+        self._fade.setEndValue(0.0)
+        self._fade.finished.connect(self.hide)
+
+        self._gone = False
+
+        # Watch the scrollbar
+        sb = scroll_area.verticalScrollBar()
+        sb.valueChanged.connect(self._on_scroll)
+        sb.rangeChanged.connect(self._on_range)
+
+    def _on_scroll(self, val: int) -> None:
+        if not self._gone and val > 24:
+            self._dismiss()
+
+    def _on_range(self, _min: int, _max: int) -> None:
+        # If content isn't actually scrollable, hide immediately
+        if _max <= 0 and not self._gone:
+            self._dismiss()
+
+    def _dismiss(self) -> None:
+        self._gone = True
+        self._bob_grp.stop()
+        self._fade.start()
+
+    def start(self) -> None:
+        """Call once the parent is laid out so geometry is known."""
+        if self._gone:
+            return
+        self._reposition()
+        self.show()
+        self._bob_grp.start()
+
+    def _reposition(self) -> None:
+        if not self.parent():
+            return
+        pw = self.parent().width()
+        ph = self.parent().height()
+        x = (pw - self.width()) // 2
+        y = ph - self.height() - sz(6)
+        self.move(x, y)
+        base = QPoint(x, y)
+        tip  = QPoint(x, y + sz(6))
+        self._bob_down.setStartValue(base)
+        self._bob_down.setEndValue(tip)
+        self._bob_up.setStartValue(tip)
+        self._bob_up.setEndValue(base)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        # Draw three stacked chevrons, each slightly more transparent than the one above
+        cx = w // 2
+        for row in range(3):
+            alpha = 200 - row * 55
+            y0 = sz(8) + row * sz(13)
+            half = sz(10)
+            tip = sz(7)
+            pen = QPen(QColor(255, 255, 255, alpha), sz(2), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+            p.setPen(pen)
+            p.drawLine(cx - half, y0,       cx,          y0 + tip)
+            p.drawLine(cx,        y0 + tip,  cx + half,   y0)
+        p.end()
+
+
+# ---------------------------------------------------------------------------
 # PAGE: UPGRADES
 # ---------------------------------------------------------------------------
 class UpgradesPage(QWidget):
@@ -3237,22 +4572,26 @@ class UpgradesPage(QWidget):
     def __init__(self, state: GameState, parent=None):
         super().__init__(parent)
         self._state = state
-        self.setStyleSheet(f"background: {PALETTE['bg_dark']};")
+        self.setStyleSheet("background: transparent;")
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
         # ── Header row ──────────────────────────────────────────────────
         hdr = QWidget()
-        hdr.setFixedHeight(52)
-        hdr.setStyleSheet(f"background: {PALETTE['bg_mid']}; border-bottom: 1px solid {PALETTE['border']};")
+        hdr.setFixedHeight(60)
+        hdr.setStyleSheet(f"""
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 {PALETTE['bg_mid']}, stop:1 {PALETTE['bg_dark']});
+            border-bottom: 1px solid {PALETTE['border']};
+        """)
         hlay = QHBoxLayout(hdr)
         hlay.setContentsMargins(16, 0, 16, 0)
-        title_lbl = QLabel("⬆ Upgrades & Skills")
+        title_lbl = QLabel("Upgrades & Skills")
         title_lbl.setFont(scaled_font(FONT_TITLE, 14, bold=True))
         title_lbl.setStyleSheet(f"color: {PALETTE['text_primary']}; background: transparent; border: none;")
         self._gold_lbl = QLabel()
-        self._gold_lbl.setFont(scaled_font(FONT_BODY, 12))
+        self._gold_lbl.setFont(scaled_font(FONT_BODY, 12, bold=True))
         self._gold_lbl.setStyleSheet(f"color: {PALETTE['gold']}; background: transparent; border: none;")
         _shard_hdr_icon = QLabel()
         _shard_hdr_icon.setFixedSize(20, 20)
@@ -3275,6 +4614,7 @@ class UpgradesPage(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setStyleSheet("background: transparent; border: none;")
+        _setup_touch_scroll(scroll)
         container = QWidget()
         container.setStyleSheet("background: transparent;")
         vlay = QVBoxLayout(container)
@@ -3283,10 +4623,14 @@ class UpgradesPage(QWidget):
         scroll.setWidget(container)
         root.addWidget(scroll)
 
+        # Scroll hint overlay — positioned over the bottom of the scroll area
+        self._scroll_hint = _ScrollHint(scroll, self)
+        QTimer.singleShot(120, self._scroll_hint.start)
+
         # ============================================================
         # SECTION 1: TOOLS
         # ============================================================
-        vlay.addWidget(self._section_header("🛠 Tools", PALETTE["accent"]))
+        vlay.addWidget(self._section_header("TOOLS", PALETTE["accent"]))
         self._tool_cards: dict[str, "_ToolCard"] = {}
         for tool in TOOL_UPGRADES:
             card = _ToolCard(tool, state, self)
@@ -3296,7 +4640,8 @@ class UpgradesPage(QWidget):
         # ============================================================
         # SECTION 2: SKILLS
         # ============================================================
-        vlay.addWidget(self._section_header("⭐ Skills", PALETTE["xp_color"]))
+        vlay.addSpacing(sz(24))
+        vlay.addWidget(self._section_header("SKILLS", PALETTE["xp_color"]))
         self._skill_cards: dict[str, "_SkillDetailCard"] = {}
         for skill_id, skill_def in SKILLS.items():
             card = _SkillDetailCard(skill_id, skill_def, state, self)
@@ -3306,15 +4651,8 @@ class UpgradesPage(QWidget):
         # ============================================================
         # SECTION 3: RUNIC FORGE
         # ============================================================
-        vlay.addWidget(self._section_header("🔮 Runic Forge  (Permanent)", PALETTE["prestige"]))
-        rune_desc = QLabel(
-            "Combine Runic Shards into permanent upgrades. These are NOT reset by Prestige.\n"
-            f"Runic Shards drop from mining and chopping (base {BASE_SPECIAL_CHANCE*100:.1f}% per strike, increases with skill level)."
-        )
-        rune_desc.setFont(scaled_font(FONT_BODY, 9))
-        rune_desc.setWordWrap(True)
-        rune_desc.setStyleSheet(f"color: {PALETTE['text_muted']}; background: transparent; border: none;")
-        vlay.addWidget(rune_desc)
+        vlay.addSpacing(sz(24))
+        vlay.addWidget(self._section_header("RUNES", PALETTE["prestige"]))
         self._rune_cards: dict[str, "_RunicCard"] = {}
         for rup in RUNIC_UPGRADES:
             card = _RunicCard(rup, state, self)
@@ -3327,22 +4665,36 @@ class UpgradesPage(QWidget):
         BUS.xp_changed.connect(lambda *_: self.refresh())
         BUS.inventory_changed.connect(self.refresh)
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "_scroll_hint") and not self._scroll_hint._gone:
+            self._scroll_hint._reposition()
+
     @staticmethod
     def _section_header(text: str, color: str) -> QWidget:
-        lbl = QLabel(text)
-        lbl.setFont(scaled_font(FONT_TITLE, 13, bold=True))
-        lbl.setStyleSheet(f"""
-            color: {color};
-            background: transparent;
-            border: none;
-            padding: 10px 0 4px 0;
+        frame = QFrame()
+        frame.setFixedHeight(sz(44))
+        frame.setStyleSheet(f"""
+            QFrame {{
+                background: {PALETTE['bg_light']};
+                border-left: 3px solid {color};
+                border-top: none; border-right: none; border-bottom: none;
+                border-radius: 0px;
+            }}
         """)
-        return lbl
+        lay = QHBoxLayout(frame)
+        lay.setContentsMargins(14, 0, 14, 0)
+        lbl = QLabel(text)
+        lbl.setFont(scaled_font(FONT_TITLE, 12, bold=True))
+        lbl.setStyleSheet(f"color: {PALETTE['text_primary']}; background: transparent; border: none;")
+        make_shadow(lbl, blur=0, color="#000000", opacity=0, offset=(0, 0))
+        lay.addWidget(lbl)
+        return frame
 
     def refresh(self):
         if not self.isVisible():
             return
-        self._gold_lbl.setText(f"🪙 {self._state.gold:.0f}")
+        self._gold_lbl.setText(f"{COIN_HTML}{self._state.gold:.0f}")
         shards = self._state.special_items.get("runicShard", 0)
         self._shards_lbl.setText(f"{shards} shards")
         for card in self._tool_cards.values():
@@ -3369,18 +4721,19 @@ def _btn_style(bg: str, fg: str, hover: str = "") -> str:
 
 class _ToolCard(QFrame):
     """Upgrade card for a single tool (10 tiers, costs gold)."""
-    _ICON_SIZE = 48
+    _ICON_SIZE = 52
 
     def __init__(self, tool: dict, state: GameState, parent=None):
         super().__init__(parent)
         self._tool = tool
         self._state = state
-        self.setMinimumHeight(80)
+        self.setMinimumHeight(86)
         self.setStyleSheet(f"""
             QFrame {{
-                background: {PALETTE['bg_card']};
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 {PALETTE['bg_card']}, stop:1 {PALETTE['bg_light']});
                 border: 1px solid {PALETTE['border']};
-                border-radius: 12px;
+                border-radius: 14px;
             }}
         """)
         lay = QHBoxLayout(self)
@@ -3435,12 +4788,13 @@ class _ToolCard(QFrame):
         self._cost_lbl.setStyleSheet(f"color: {PALETTE['gold']}; background: transparent; border: none;")
         self._btn = QPushButton("Upgrade")
         self._btn.setFont(scaled_font(FONT_BODY, 10, bold=True))
-        self._btn.setFixedSize(90, 34)
+        self._btn.setFixedSize(sz(96), sz(38))
         self._btn.setCursor(QCursor(Qt.PointingHandCursor))
         self._btn.clicked.connect(self._buy)
         right.addWidget(self._cost_lbl)
         right.addWidget(self._btn)
         lay.addLayout(right)
+        make_shadow(self, blur=10, opacity=70)
         self.refresh()
 
     def _update_icon(self, tier: int):
@@ -3473,20 +4827,50 @@ class _ToolCard(QFrame):
         self._tier_lbl.setText(f"Tier {tier} / {max_tier}")
         self._update_icon(tier)
         if is_maxed:
-            self._cost_lbl.setText("MAX")
+            self._cost_lbl.setText("MAXED")
             self._btn.setText("✓ Max")
             self._btn.setEnabled(False)
-            self._btn.setStyleSheet(_btn_style(PALETTE["bg_light"], PALETTE["success"]))
+            self._btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: {PALETTE['bg_light']};
+                    color: {PALETTE['success']};
+                    border: 1px solid {PALETTE['success']}55;
+                    border-radius: 10px; font-weight: bold;
+                }}
+            """)
+            self.setStyleSheet(f"""
+                QFrame {{
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 {PALETTE['bg_card']}, stop:1 {PALETTE['bg_light']});
+                    border: 1px solid {PALETTE['success']}66;
+                    border-radius: 14px;
+                }}
+            """)
         elif self._state.gold >= cost:
-            self._cost_lbl.setText(f"🪙 {cost:,}")
-            self._btn.setText("Upgrade")
+            self._cost_lbl.setText(f"{COIN_HTML}{cost:,}")
+            self._btn.setText("Upgrade ▲")
             self._btn.setEnabled(True)
-            self._btn.setStyleSheet(_btn_style(PALETTE["accent"], PALETTE["bg_dark"], "#C08030"))
+            self._btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 {PALETTE['accent']}, stop:1 #B07820);
+                    color: {PALETTE['bg_dark']};
+                    border: none; border-radius: 10px; font-weight: bold;
+                }}
+                QPushButton:pressed {{ background: #906010; }}
+            """)
         else:
-            self._cost_lbl.setText(f"🪙 {cost:,}")
+            self._cost_lbl.setText(f"{COIN_HTML}{cost:,}")
             self._btn.setText("Upgrade")
             self._btn.setEnabled(False)
-            self._btn.setStyleSheet(_btn_style(PALETTE["text_dim"], PALETTE["bg_mid"]))
+            self._btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: {PALETTE['bg_light']};
+                    color: {PALETTE['text_dim']};
+                    border: 1px solid {PALETTE['border']};
+                    border-radius: 10px; font-weight: bold;
+                }}
+            """)
 
     def _buy(self):
         cost = self._state.get_tool_cost(self._tool["id"])
@@ -3494,6 +4878,11 @@ class _ToolCard(QFrame):
             BUS.gold_changed.emit()
             BUS.gold_delta.emit(-float(cost))
             self.refresh()
+            _orig_ss = self.styleSheet()
+            self.setStyleSheet(
+                f"QFrame {{ background: {PALETTE['bg_card']}; border: 2px solid {PALETTE['success']}; border-radius: 12px; }}"
+            )
+            QTimer.singleShot(450, lambda: self.setStyleSheet(_orig_ss))
 
 
 class _SkillDetailCard(QFrame):
@@ -3504,13 +4893,16 @@ class _SkillDetailCard(QFrame):
         self._skill_def = skill_def
         self._state = state
         self._expanded = False
+        color = skill_def["color"]
         self.setStyleSheet(f"""
             QFrame {{
                 background: {PALETTE['bg_card']};
                 border: 1px solid {PALETTE['border']};
-                border-radius: 12px;
+                border-left: 3px solid {color};
+                border-radius: 14px;
             }}
         """)
+        make_shadow(self, blur=10, opacity=70)
 
         self._root = QVBoxLayout(self)
         self._root.setContentsMargins(14, 10, 14, 10)
@@ -3626,14 +5018,16 @@ class _RunicCard(QFrame):
         super().__init__(parent)
         self._rup = rup
         self._state = state
-        self.setMinimumHeight(80)
+        self.setMinimumHeight(86)
         self.setStyleSheet(f"""
             QFrame {{
                 background: {PALETTE['bg_card']};
-                border: 1px solid {PALETTE['prestige']};
-                border-radius: 12px;
+                border: 1px solid {PALETTE['border']};
+                border-left: 3px solid {PALETTE['prestige']};
+                border-radius: 14px;
             }}
         """)
+        make_shadow(self, blur=10, opacity=70)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(14, 10, 14, 10)
         lay.setSpacing(12)
@@ -3675,7 +5069,7 @@ class _RunicCard(QFrame):
         self._cost_lbl.setStyleSheet(f"color: {PALETTE['accent2']}; background: transparent; border: none;")
         self._btn = QPushButton("Forge")
         self._btn.setFont(scaled_font(FONT_BODY, 10, bold=True))
-        self._btn.setFixedSize(80, 34)
+        self._btn.setFixedSize(sz(90), sz(38))
         self._btn.setCursor(QCursor(Qt.PointingHandCursor))
         self._btn.clicked.connect(self._forge)
         right.addWidget(self._cost_lbl)
@@ -3692,20 +5086,42 @@ class _RunicCard(QFrame):
         is_maxed = tier >= max_tier
         self._tier_lbl.setText(f"Tier {tier} / {max_tier}  (Permanent)")
         if is_maxed:
-            self._cost_lbl.setText("MAX")
+            self._cost_lbl.setText("MAXED")
             self._btn.setText("✓ Max")
             self._btn.setEnabled(False)
-            self._btn.setStyleSheet(_btn_style(PALETTE["bg_light"], PALETTE["success"]))
+            self._btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: {PALETTE['bg_light']};
+                    color: {PALETTE['success']};
+                    border: 1px solid {PALETTE['success']}55;
+                    border-radius: 10px; font-weight: bold;
+                }}
+            """)
         elif shards >= cost:
             self._cost_lbl.setText(f"{cost} shards")
-            self._btn.setText("Forge")
+            self._btn.setText("⚒ Forge")
             self._btn.setEnabled(True)
-            self._btn.setStyleSheet(_btn_style(PALETTE["prestige"], "white", "#A060E0"))
+            self._btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 {PALETTE['prestige']}, stop:1 #9050C0);
+                    color: white;
+                    border: none; border-radius: 10px; font-weight: bold;
+                }}
+                QPushButton:pressed {{ background: #7030A0; }}
+            """)
         else:
             self._cost_lbl.setText(f"{cost} shards")
             self._btn.setText("Forge")
             self._btn.setEnabled(False)
-            self._btn.setStyleSheet(_btn_style(PALETTE["text_dim"], PALETTE["bg_mid"]))
+            self._btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: {PALETTE['bg_light']};
+                    color: {PALETTE['text_dim']};
+                    border: 1px solid {PALETTE['border']};
+                    border-radius: 10px; font-weight: bold;
+                }}
+            """)
 
     def _forge(self):
         cost = self._state.get_runic_cost(self._rup["id"])
@@ -3713,6 +5129,11 @@ class _RunicCard(QFrame):
             BUS.inventory_changed.emit()
             BUS.shard_delta.emit(-cost)
             self.refresh()
+            _orig_ss = self.styleSheet()
+            self.setStyleSheet(
+                f"QFrame {{ background: {PALETTE['bg_card']}; border: 2px solid {PALETTE['gold']}; border-radius: 12px; }}"
+            )
+            QTimer.singleShot(450, lambda: self.setStyleSheet(_orig_ss))
 
 
 # ---------------------------------------------------------------------------
@@ -3722,114 +5143,237 @@ class PrestigePage(QWidget):
     def __init__(self, state: GameState, parent=None):
         super().__init__(parent)
         self._state = state
-        self.setStyleSheet(f"background: {PALETTE['bg_dark']};")
+        self.setStyleSheet("background: transparent;")
         self._selected_prestige_count = 1
-        root = QVBoxLayout(self)
-        root.setContentsMargins(24, 24, 24, 24)
-        root.setSpacing(20)
+        self._coin_rows: list = []
 
-        title = QLabel("✦ Prestige")
-        title.setFont(scaled_font(FONT_TITLE, 18, bold=True))
+        # Outer scroll so everything fits on small screens
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setStyleSheet("background: transparent; border: none;")
+        _setup_touch_scroll(scroll)
+        content = QWidget()
+        content.setStyleSheet("background: transparent;")
+        root = QVBoxLayout(content)
+        root.setContentsMargins(20, 20, 20, 20)
+        root.setSpacing(14)
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
+
+        title_row = QHBoxLayout()
+        title_row.setSpacing(8)
+        title_row.setContentsMargins(0, 0, 0, 0)
+        _title_px = load_image("prestigeStatic.png")
+        if _title_px:
+            t_ico = QLabel()
+            t_ico.setPixmap(_title_px.scaled(sz(26), sz(26), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            t_ico.setStyleSheet("background: transparent; border: none;")
+            title_row.addWidget(t_ico)
+        title = QLabel("  Prestige")
+        title.setFont(scaled_font(FONT_TITLE, 20, bold=True))
         title.setStyleSheet(f"color: {PALETTE['prestige']}; background: transparent; border: none;")
-        root.addWidget(title)
+        title_row.addWidget(title)
+        title_row.addStretch()
+        root.addLayout(title_row)
 
-        info = QLabel(
-            "Prestige resets your gold, skills, inventory, and upgrades.\n"
-            "In return you gain a Prestige Tier and a Prestige Coin to spend\n"
-            "on permanent bonuses that carry through all future runs."
-        )
-        info.setFont(scaled_font(FONT_BODY, 11))
-        info.setWordWrap(True)
-        info.setStyleSheet(f"color: {PALETTE['text_muted']}; background: transparent; border: none;")
-        root.addWidget(info)
-
-        # Status card
-        self._status_card = QFrame()
-        self._status_card.setStyleSheet(f"""
+        # ── Hero status card ───────────────────────────────────────────
+        hero = QFrame()
+        hero.setStyleSheet(f"""
             QFrame {{
-                background: {PALETTE['bg_card']};
-                border: 1px solid {PALETTE['prestige']};
-                border-radius: 16px;
-                padding: 12px;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #1A1032, stop:1 #261848);
+                border: 2px solid {PALETTE['prestige']};
+                border-radius: 20px;
             }}
         """)
-        status_lay = QVBoxLayout(self._status_card)
-        status_lay.setSpacing(8)
-        self._tier_lbl = QLabel()
-        self._tier_lbl.setFont(scaled_font(FONT_TITLE, 14, bold=True))
-        self._tier_lbl.setStyleSheet(f"color: {PALETTE['prestige']}; background: transparent; border: none;")
-        self._coins_lbl = QLabel()
-        self._coins_lbl.setFont(scaled_font(FONT_BODY, 12))
-        self._coins_lbl.setStyleSheet(f"color: {PALETTE['gold']}; background: transparent; border: none;")
-        self._cost_lbl = QLabel()
-        self._cost_lbl.setFont(scaled_font(FONT_BODY, 11))
-        self._cost_lbl.setStyleSheet(f"color: {PALETTE['text_muted']}; background: transparent; border: none;")
-        status_lay.addWidget(self._tier_lbl)
-        status_lay.addWidget(self._coins_lbl)
-        status_lay.addWidget(self._cost_lbl)
-        self._multi_hint_lbl = QLabel()
-        self._multi_hint_lbl.setFont(scaled_font(FONT_BODY, 10, bold=True))
-        self._multi_hint_lbl.setStyleSheet(f"color: {PALETTE['accent2']}; background: transparent; border: none;")
-        status_lay.addWidget(self._multi_hint_lbl)
-        make_shadow(self._status_card, blur=20, color=PALETTE["prestige"], opacity=60)
-        root.addWidget(self._status_card)
+        make_shadow(hero, blur=32, color=PALETTE["prestige"], opacity=90)
+        hero_lay = QVBoxLayout(hero)
+        hero_lay.setContentsMargins(20, 18, 20, 18)
+        hero_lay.setSpacing(10)
 
-        # Multi-prestige picker
-        picker = QFrame()
-        picker.setStyleSheet(f"""
+        # Top row: tier label + coin badge
+        tier_row = QHBoxLayout()
+        tier_row.setSpacing(10)
+        tier_icon_lbl = QLabel()
+        _tier_ico_px = load_image("prestigeStatic.png")
+        if _tier_ico_px:
+            tier_icon_lbl.setPixmap(_tier_ico_px.scaled(sz(32), sz(32), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        tier_icon_lbl.setStyleSheet("background: transparent; border: none;")
+        self._tier_lbl = QLabel()
+        self._tier_lbl.setFont(scaled_font(FONT_TITLE, 22, bold=True))
+        self._tier_lbl.setStyleSheet(f"color: {PALETTE['text_primary']}; background: transparent; border: none;")
+        tier_row.addWidget(tier_icon_lbl)
+        tier_row.addWidget(self._tier_lbl)
+        tier_row.addStretch()
+
+        # Coin badge pill
+        coin_pill = QFrame()
+        coin_pill.setStyleSheet(f"""
             QFrame {{
-                background: {PALETTE['bg_card']};
-                border: 1px solid {PALETTE['border']};
+                background: {PALETTE['bg_dark']};
+                border: 1px solid {PALETTE['gold']};
                 border-radius: 14px;
             }}
         """)
-        play = QHBoxLayout(picker)
-        play.setContentsMargins(14, 12, 14, 12)
-        play.setSpacing(10)
-        plbl = QLabel("Prestige Count")
-        plbl.setFont(scaled_font(FONT_BODY, 11, bold=True))
-        plbl.setStyleSheet(f"color: {PALETTE['text_primary']}; background: transparent; border: none;")
-        self._mp_minus_btn = QPushButton("−")
-        self._mp_minus_btn.setFixedSize(42, 42)
-        self._mp_minus_btn.setCursor(QCursor(Qt.PointingHandCursor))
-        self._mp_minus_btn.setStyleSheet(_btn_style(PALETTE["bg_light"], PALETTE["text_primary"], PALETTE["bg_card"]))
-        self._mp_count_lbl = QLabel("1x")
-        self._mp_count_lbl.setAlignment(Qt.AlignCenter)
-        self._mp_count_lbl.setMinimumWidth(54)
-        self._mp_count_lbl.setFont(scaled_font(FONT_MONO, 14, bold=True))
-        self._mp_count_lbl.setStyleSheet(f"color: {PALETTE['prestige']}; background: transparent; border: none;")
-        self._mp_plus_btn = QPushButton("+")
-        self._mp_plus_btn.setFixedSize(42, 42)
-        self._mp_plus_btn.setCursor(QCursor(Qt.PointingHandCursor))
-        self._mp_plus_btn.setStyleSheet(_btn_style(PALETTE["bg_light"], PALETTE["text_primary"], PALETTE["bg_card"]))
-        self._mp_max_btn = QPushButton("Max")
-        self._mp_max_btn.setFixedSize(64, 42)
-        self._mp_max_btn.setCursor(QCursor(Qt.PointingHandCursor))
-        self._mp_max_btn.setStyleSheet(_btn_style(PALETTE["accent2"], PALETTE["bg_dark"], "#4EB4A6"))
-        self._mp_minus_btn.clicked.connect(lambda: self._adjust_prestige_count(-1))
-        self._mp_plus_btn.clicked.connect(lambda: self._adjust_prestige_count(1))
-        self._mp_max_btn.clicked.connect(self._select_max_prestige)
-        play.addWidget(plbl)
-        play.addStretch()
-        play.addWidget(self._mp_minus_btn)
-        play.addWidget(self._mp_count_lbl)
-        play.addWidget(self._mp_plus_btn)
-        play.addWidget(self._mp_max_btn)
-        root.addWidget(picker)
+        pill_lay = QHBoxLayout(coin_pill)
+        pill_lay.setContentsMargins(12, 5, 12, 5)
+        pill_lay.setSpacing(5)
+        pill_icon = QLabel()
+        _coin_pill_px = load_image("prestigeCoinStatic.png")
+        if _coin_pill_px:
+            pill_icon.setPixmap(_coin_pill_px.scaled(sz(24), sz(24), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        pill_icon.setStyleSheet("background: transparent; border: none;")
+        self._coins_lbl = QLabel()
+        self._coins_lbl.setFont(scaled_font(FONT_BODY, 13, bold=True))
+        self._coins_lbl.setStyleSheet(f"color: {PALETTE['gold']}; background: transparent; border: none;")
+        pill_coin_sub = QLabel("coins")
+        pill_coin_sub.setFont(scaled_font(FONT_BODY, 10))
+        pill_coin_sub.setStyleSheet(f"color: {PALETTE['text_muted']}; background: transparent; border: none;")
+        pill_lay.addWidget(pill_icon)
+        pill_lay.addWidget(self._coins_lbl)
+        pill_lay.addWidget(pill_coin_sub)
+        tier_row.addWidget(coin_pill)
+        hero_lay.addLayout(tier_row)
 
-        # Prestige button
-        self._prestige_btn = QPushButton("✦ Prestige Now")
-        self._prestige_btn.setFont(scaled_font(FONT_TITLE, 14, bold=True))
-        self._prestige_btn.setFixedHeight(56)
+        # Divider
+        hdiv = QFrame()
+        hdiv.setFrameShape(QFrame.HLine)
+        hdiv.setStyleSheet(f"background: {PALETTE['border']}; border: none; max-height: 1px;")
+        hero_lay.addWidget(hdiv)
+
+        self._cost_lbl = QLabel()
+        self._cost_lbl.setFont(scaled_font(FONT_BODY, 11))
+        self._cost_lbl.setStyleSheet(f"color: {PALETTE['text_muted']}; background: transparent; border: none;")
+        self._multi_hint_lbl = QLabel()
+        self._multi_hint_lbl.setFont(scaled_font(FONT_BODY, 10, bold=True))
+        self._multi_hint_lbl.setStyleSheet(f"color: {PALETTE['accent2']}; background: transparent; border: none;")
+        hero_lay.addWidget(self._cost_lbl)
+        hero_lay.addWidget(self._multi_hint_lbl)
+
+        # Progress bar toward next prestige threshold
+        self._next_bar = QProgressBar()
+        self._next_bar.setRange(0, 100)
+        self._next_bar.setValue(0)
+        self._next_bar.setTextVisible(False)
+        self._next_bar.setFixedHeight(sz(12))
+        self._next_bar.setStyleSheet(f"""
+            QProgressBar {{ background: {PALETTE['bg_light']}; border: none; border-radius: {sz(6)}px; }}
+            QProgressBar::chunk {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                stop:0 #7020B8, stop:1 {PALETTE['prestige']}); border-radius: {sz(6)}px; }}
+        """)
+        hero_lay.addWidget(self._next_bar)
+        root.addWidget(hero)
+
+        # ── What resets / what persists ───────────────────────────────
+        rp_row = QHBoxLayout()
+        rp_row.setSpacing(10)
+
+        reset_card = QFrame()
+        reset_card.setStyleSheet(f"""
+            QFrame {{
+                background: {PALETTE['bg_card']};
+                border: 1px solid #7A3030;
+                border-radius: 14px;
+            }}
+        """)
+        rc_lay = QVBoxLayout(reset_card)
+        rc_lay.setContentsMargins(14, 12, 14, 12)
+        rc_lay.setSpacing(4)
+        r_title = QLabel("🔄  Resets")
+        r_title.setFont(scaled_font(FONT_BODY, 10, bold=True))
+        r_title.setStyleSheet(f"color: {PALETTE['danger']}; background: transparent; border: none;")
+        rc_lay.addWidget(r_title)
+        for item in ("Gold", "Skills & XP", "Inventory", "Tool Upgrades", "Active Refining"):
+            lbl = QLabel(f"  • {item}")
+            lbl.setFont(scaled_font(FONT_BODY, 9))
+            lbl.setStyleSheet(f"color: {PALETTE['text_muted']}; background: transparent; border: none;")
+            rc_lay.addWidget(lbl)
+
+        persist_card = QFrame()
+        persist_card.setStyleSheet(f"""
+            QFrame {{
+                background: {PALETTE['bg_card']};
+                border: 1px solid #307A50;
+                border-radius: 14px;
+            }}
+        """)
+        pc_lay = QVBoxLayout(persist_card)
+        pc_lay.setContentsMargins(14, 12, 14, 12)
+        pc_lay.setSpacing(4)
+        p_title = QLabel("✅  Persists")
+        p_title.setFont(scaled_font(FONT_BODY, 10, bold=True))
+        p_title.setStyleSheet(f"color: {PALETTE['success']}; background: transparent; border: none;")
+        pc_lay.addWidget(p_title)
+        for item in ("Prestige Tier", "Prestige Coins", "Prestige Bonuses", "Runic Upgrades"):
+            lbl = QLabel(f"  • {item}")
+            lbl.setFont(scaled_font(FONT_BODY, 9))
+            lbl.setStyleSheet(f"color: {PALETTE['text_muted']}; background: transparent; border: none;")
+            pc_lay.addWidget(lbl)
+
+        rp_row.addWidget(reset_card)
+        rp_row.addWidget(persist_card)
+        root.addLayout(rp_row)
+
+        # ── Prestige button ────────────────────────────────────────────
+        self._prestige_btn = QPushButton("  Prestige Now")
+        _prestige_btn_px = load_image("prestigeStatic.png")
+        if _prestige_btn_px:
+            self._prestige_btn.setIcon(QIcon(_prestige_btn_px))
+            self._prestige_btn.setIconSize(QSize(sz(22), sz(22)))
+        self._prestige_btn.setFont(scaled_font(FONT_TITLE, 15, bold=True))
+        self._prestige_btn.setFixedHeight(60)
         self._prestige_btn.setCursor(QCursor(Qt.PointingHandCursor))
         self._prestige_btn.clicked.connect(self._do_prestige)
         root.addWidget(self._prestige_btn)
 
-        # Coin spend section
-        coin_title = QLabel("Spend Prestige Coins")
-        coin_title.setFont(scaled_font(FONT_TITLE, 13, bold=True))
-        coin_title.setStyleSheet(f"color: {PALETTE['text_primary']}; background: transparent; border: none;")
-        root.addWidget(coin_title)
+        # Pulsing glow on prestige button — active when the player can afford it
+        self._prestige_glow_eff = QGraphicsDropShadowEffect(self._prestige_btn)
+        self._prestige_glow_eff.setOffset(0, 0)
+        _gc = QColor(PALETTE["prestige"])
+        _gc.setAlpha(200)
+        self._prestige_glow_eff.setColor(_gc)
+        self._prestige_glow_eff.setBlurRadius(4)
+        self._prestige_btn.setGraphicsEffect(self._prestige_glow_eff)
+        _gfwd = QPropertyAnimation(self._prestige_glow_eff, b"blurRadius")
+        _gfwd.setDuration(900)
+        _gfwd.setStartValue(4)
+        _gfwd.setEndValue(30)
+        _gbck = QPropertyAnimation(self._prestige_glow_eff, b"blurRadius")
+        _gbck.setDuration(900)
+        _gbck.setStartValue(30)
+        _gbck.setEndValue(4)
+        self._glow_seq = QSequentialAnimationGroup(self)
+        self._glow_seq.addAnimation(_gfwd)
+        self._glow_seq.addAnimation(_gbck)
+        self._glow_seq.setLoopCount(-1)
+        self._glow_active = False
+
+        # ── Coin spend section ─────────────────────────────────────────
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet(f"color: {PALETTE['border']}; background: {PALETTE['border']}; border: none; max-height: 1px;")
+        root.addWidget(sep)
+
+        coin_header_row = QHBoxLayout()
+        _coin_hdr_px = load_image("prestigeCoinStatic.png")
+        if _coin_hdr_px:
+            _coin_hdr_ico = QLabel()
+            _coin_hdr_ico.setPixmap(_coin_hdr_px.scaled(sz(18), sz(18), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            _coin_hdr_ico.setStyleSheet("background: transparent; border: none;")
+            coin_header_row.addWidget(_coin_hdr_ico)
+        coin_title_lbl = QLabel("  Spend Prestige Coins")
+        coin_title_lbl.setFont(scaled_font(FONT_TITLE, 13, bold=True))
+        coin_title_lbl.setStyleSheet(f"color: {PALETTE['text_primary']}; background: transparent; border: none;")
+        coin_header_row.addWidget(coin_title_lbl)
+        coin_header_row.addStretch()
+        self._coins_avail_lbl = QLabel()
+        self._coins_avail_lbl.setFont(scaled_font(FONT_BODY, 10))
+        self._coins_avail_lbl.setStyleSheet(f"color: {PALETTE['text_muted']}; background: transparent; border: none;")
+        coin_header_row.addWidget(self._coins_avail_lbl)
+        root.addLayout(coin_header_row)
 
         for bonus in PRESTIGE_BONUS_DEFS:
             row = self._make_coin_row(bonus["id"], bonus["label"], bonus["desc"])
@@ -3840,39 +5384,185 @@ class PrestigePage(QWidget):
         BUS.prestige_changed.connect(self.refresh)
         self.refresh()
 
+        # ── Inline confirmation overlay (no separate window) ───────────
+        self._confirm_overlay = QWidget(self)
+        self._confirm_overlay.setStyleSheet("background: rgba(0,0,0,0);")
+        self._confirm_overlay.hide()
+        _ov_lay = QVBoxLayout(self._confirm_overlay)
+        _ov_lay.setContentsMargins(0, 0, 0, 0)
+        _ov_lay.setAlignment(Qt.AlignCenter)
+
+        _card = QFrame(self._confirm_overlay)
+        _card.setStyleSheet(f"""
+            QFrame {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #1A1032, stop:1 #261848);
+                border: 2px solid {PALETTE['prestige']};
+                border-radius: 20px;
+            }}
+        """)
+        make_shadow(_card, blur=40, color=PALETTE["prestige"], opacity=120)
+        _card_lay = QVBoxLayout(_card)
+        _card_lay.setContentsMargins(sz(45), sz(38), sz(45), sz(38))
+        _card_lay.setSpacing(sz(22))
+
+        _conf_title = QLabel("Confirm Prestige")
+        _conf_title.setFont(scaled_font(FONT_TITLE, 26, bold=True))
+        _conf_title.setStyleSheet(f"color: {PALETTE['prestige']}; background: transparent; border: none;")
+        _conf_title.setAlignment(Qt.AlignCenter)
+        _card_lay.addWidget(_conf_title)
+
+        self._conf_detail_lbl = QLabel()
+        self._conf_detail_lbl.setFont(scaled_font(FONT_BODY, 18))
+        self._conf_detail_lbl.setStyleSheet(f"color: {PALETTE['text_primary']}; background: transparent; border: none;")
+        self._conf_detail_lbl.setAlignment(Qt.AlignCenter)
+        self._conf_detail_lbl.setWordWrap(True)
+        _card_lay.addWidget(self._conf_detail_lbl)
+
+        _warn = QLabel("Resets: Gold · Skills · Inventory · Tools · Active Refining")
+        _warn.setFont(scaled_font(FONT_BODY, 14))
+        _warn.setStyleSheet(f"color: {PALETTE['danger']}; background: transparent; border: none;")
+        _warn.setAlignment(Qt.AlignCenter)
+        _warn.setWordWrap(True)
+        _card_lay.addWidget(_warn)
+
+        _btn_row = QHBoxLayout()
+        _btn_row.setSpacing(sz(16))
+        _cancel_btn = QPushButton("Cancel")
+        _cancel_btn.setFont(scaled_font(FONT_BODY, 19, bold=True))
+        _cancel_btn.setFixedHeight(sz(77))
+        _cancel_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        _cancel_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {PALETTE['bg_light']};
+                color: {PALETTE['text_primary']};
+                border: 1px solid {PALETTE['border']};
+                border-radius: 12px;
+            }}
+            QPushButton:hover {{ background: {PALETTE['bg_card']}; }}
+        """)
+        _cancel_btn.clicked.connect(lambda: self._confirm_overlay.hide())
+
+        _go_btn = QPushButton("✓  Prestige!")
+        _go_btn.setFont(scaled_font(FONT_TITLE, 21, bold=True))
+        _go_btn.setFixedHeight(sz(77))
+        _go_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        _go_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
+                    stop:0 #7020B8, stop:1 #9848E0);
+                color: white;
+                border: none;
+                border-radius: 12px;
+            }}
+            QPushButton:hover {{ background: #A060E0; }}
+        """)
+        _go_btn.clicked.connect(self._confirm_prestige)
+        _btn_row.addWidget(_cancel_btn)
+        _btn_row.addWidget(_go_btn)
+        _card_lay.addLayout(_btn_row)
+
+        _ov_lay.addWidget(_card)
+        self._confirm_overlay.raise_()
+
     def _make_coin_row(self, bonus_id: str, label: str, desc: str) -> QFrame:
         frame = QFrame()
         frame.setStyleSheet(f"""
             QFrame {{
                 background: {PALETTE['bg_card']};
                 border: 1px solid {PALETTE['border']};
-                border-radius: 12px;
+                border-radius: 14px;
             }}
         """)
         lay = QHBoxLayout(frame)
-        lay.setContentsMargins(16, 10, 16, 10)
+        lay.setContentsMargins(16, 12, 16, 12)
         lay.setSpacing(12)
 
         info = QVBoxLayout()
+        info.setSpacing(2)
         lbl = QLabel(label)
         lbl.setFont(scaled_font(FONT_BODY, 11, bold=True))
         lbl.setStyleSheet(f"color: {PALETTE['text_primary']}; background: transparent; border: none;")
         dlbl = QLabel(desc)
         dlbl.setFont(scaled_font(FONT_BODY, 9))
+        dlbl.setWordWrap(True)
         dlbl.setStyleSheet(f"color: {PALETTE['text_muted']}; background: transparent; border: none;")
         info.addWidget(lbl)
         info.addWidget(dlbl)
-        lay.addLayout(info)
-        lay.addStretch()
+        lay.addLayout(info, stretch=1)
 
-        stacks_lbl = QLabel()
-        stacks_lbl.setFont(scaled_font(FONT_MONO, 11, bold=True))
-        stacks_lbl.setStyleSheet(f"color: {PALETTE['prestige']}; background: transparent; border: none;")
-        stacks_lbl.setFixedWidth(40)
+        # Stack badge
+        stack_badge = QFrame()
+        stack_badge.setFixedSize(44, 36)
+        stack_badge.setStyleSheet(f"""
+            QFrame {{
+                background: {PALETTE['bg_dark']};
+                border: 1px solid {PALETTE['prestige']};
+                border-radius: 10px;
+            }}
+        """)
+        badge_lay = QVBoxLayout(stack_badge)
+        badge_lay.setContentsMargins(0, 0, 0, 0)
+        stacks_lbl = QLabel("0")
+        stacks_lbl.setFont(scaled_font(FONT_MONO, 12, bold=True))
         stacks_lbl.setAlignment(Qt.AlignCenter)
-        lay.addWidget(stacks_lbl)
+        stacks_lbl.setStyleSheet(f"color: {PALETTE['prestige']}; background: transparent; border: none;")
+        badge_lay.addWidget(stacks_lbl)
+        lay.addWidget(stack_badge)
 
-        btn = QPushButton("Spend 💜")
+        # Quantity controls
+        _qty_ctrl = QWidget()
+        _qty_ctrl.setStyleSheet("background: transparent;")
+        _qty_lay = QHBoxLayout(_qty_ctrl)
+        _qty_lay.setContentsMargins(0, 0, 0, 0)
+        _qty_lay.setSpacing(2)
+        def _qbtn(txt: str) -> QPushButton:
+            b = QPushButton(txt)
+            b.setFont(scaled_font(FONT_BODY, 11, bold=True))
+            b.setFixedSize(sz(26), sz(30))
+            b.setCursor(QCursor(Qt.PointingHandCursor))
+            b.setStyleSheet(f"""
+                QPushButton {{
+                    background: {PALETTE['bg_light']};
+                    color: {PALETTE['text_muted']};
+                    border: 1px solid {PALETTE['border']};
+                    border-radius: 6px;
+                }}
+                QPushButton:pressed {{ background: {PALETTE['bg_card']}; }}
+            """)
+            return b
+        _qty_minus = _qbtn("\u2212")
+        _qty_spin = QSpinBox()
+        _qty_spin.setRange(1, 9999)
+        _qty_spin.setValue(1)
+        _qty_spin.setFixedSize(sz(46), sz(30))
+        _qty_spin.setAlignment(Qt.AlignCenter)
+        _qty_spin.setFont(scaled_font(FONT_MONO, 9, bold=True))
+        _qty_spin.setStyleSheet(f"""
+            QSpinBox {{
+                background: {PALETTE['bg_dark']};
+                color: {PALETTE['prestige']};
+                border: 1px solid {PALETTE['border']};
+                border-radius: 6px;
+                padding: 1px 2px;
+            }}
+            QSpinBox::up-button, QSpinBox::down-button {{ width: 0; }}
+        """)
+        _qty_spin.lineEdit().setReadOnly(True)
+        _qty_spin.lineEdit().setFocusPolicy(Qt.NoFocus)
+        _qty_plus = _qbtn("+")
+        _qty_minus.clicked.connect(lambda: _qty_spin.setValue(max(1, _qty_spin.value() - 1)))
+        _qty_plus.clicked.connect(lambda: _qty_spin.setValue(_qty_spin.value() + 1))
+        _qty_lay.addWidget(_qty_minus)
+        _qty_lay.addWidget(_qty_spin)
+        _qty_lay.addWidget(_qty_plus)
+        lay.addWidget(_qty_ctrl)
+
+        btn = QPushButton("  Spend")
+        _btn_coin_px = load_image("prestigeCoinStatic.png")
+        if _btn_coin_px:
+            btn.setIcon(QIcon(_btn_coin_px))
+            btn.setIconSize(QSize(sz(16), sz(16)))
         btn.setFont(scaled_font(FONT_BODY, 10, bold=True))
         btn.setFixedSize(100, 36)
         btn.setCursor(QCursor(Qt.PointingHandCursor))
@@ -3887,67 +5577,97 @@ class PrestigePage(QWidget):
             QPushButton:hover {{ background: #A060E0; }}
             QPushButton:disabled {{ background: {PALETTE['text_dim']}; color: {PALETTE['bg_mid']}; }}
         """)
+        btn.clicked.connect(lambda _=False, bid=bonus_id, qs=_qty_spin: self._spend_coin(bid, qs.value()))
 
-        def spend(bid=bonus_id, sl=stacks_lbl):
-            if self._state.spend_prestige_coin(bid):
-                BUS.prestige_changed.emit()
-                sl.setText(str(self._state.prestige_bonuses[bid]))
-
-        btn.clicked.connect(spend)
-
-        # Store refs for refresh
         frame._stacks_lbl = stacks_lbl
+        frame._qty_spin = _qty_spin
         frame._btn = btn
         frame._bonus_id = bonus_id
         lay.addWidget(btn)
-
-        self._coin_rows = getattr(self, "_coin_rows", [])
         self._coin_rows.append(frame)
         return frame
 
+    def _spend_coin(self, bonus_id: str, count: int = 1) -> None:
+        spent = self._state.spend_prestige_coins(bonus_id, count)
+        if spent > 0:
+            self._state.save()
+            BUS.prestige_changed.emit()
+
     def refresh(self):
-        if not self.isVisible():
-            return
         tier = self._state.prestige_tier
         coins = self._state.prestige_coins
-        max_count = max(1, self._state.max_consecutive_prestiges())
-        self._selected_prestige_count = max(1, min(self._selected_prestige_count, max_count))
-        cost = self._state.total_prestige_cost(self._selected_prestige_count)
-        can = self._state.gold >= cost and self._selected_prestige_count > 0
-        self._tier_lbl.setText(f"Prestige Tier: {tier}")
-        self._coins_lbl.setText(f"Prestige Coins: {coins} 💜")
-        self._cost_lbl.setText(
-            f"{self._selected_prestige_count}x prestige costs {cost:,}🪙  (you have {int(self._state.gold):,}🪙)"
-        )
-        can_multi = self._state.max_consecutive_prestiges()
-        if can_multi > 1:
-            self._multi_hint_lbl.setText(f"You can chain {can_multi} prestiges right now.")
-        elif can_multi == 1:
-            self._multi_hint_lbl.setText("You can afford 1 prestige right now.")
+        max_count = self._state.max_consecutive_prestiges()
+        self._selected_prestige_count = max_count
+        can = max_count >= 1
+        cost = self._state.total_prestige_cost(max_count) if can else 0
+
+        self._tier_lbl.setText(f"Tier  {tier}")
+        self._coins_lbl.setText(str(coins))
+        self._coins_avail_lbl.setText(f"{coins} available")
+
+        # Progress bar toward next threshold
+        # When the player can already afford prestiges, show progress toward
+        # the first threshold they CANNOT yet reach (after exhausting all they can).
+        if max_count > 0:
+            spent = self._state.total_prestige_cost(max_count)
+            remaining = max(0.0, self._state.gold - spent)
+            next_tier_cost = self._state.prestige_cost_for_tier(self._state.prestige_tier + max_count)
+            pct = min(100, int(remaining / max(1, next_tier_cost) * 100))
         else:
-            self._multi_hint_lbl.setText("Earn more gold to reach the next prestige threshold.")
-        self._mp_count_lbl.setText(f"{self._selected_prestige_count}x")
-        self._mp_minus_btn.setEnabled(self._selected_prestige_count > 1)
-        self._mp_plus_btn.setEnabled(self._selected_prestige_count < max_count)
-        self._mp_max_btn.setEnabled(max_count > 1)
+            next_cost = self._state.prestige_cost()
+            pct = min(100, int(self._state.gold / max(1, next_cost) * 100))
+        self._next_bar.setValue(pct)
+
+        if can:
+            earned = self._state.coins_for_prestige_count(max_count)
+            self._cost_lbl.setText(
+                f"Max prestige: {max_count}×  —  costs {fmt_number(cost)} {COIN_HTML}"
+            )
+            self._multi_hint_lbl.setText(
+                f"⚡ Earn {earned} prestige coin{'s' if earned != 1 else ''}!"
+            )
+        else:
+            self._cost_lbl.setText(
+                f"Next prestige: {fmt_number(next_tier_cost if max_count > 0 else self._state.prestige_cost())} {COIN_HTML}  "
+                f"(have {fmt_number(self._state.gold)})"
+            )
+            self._multi_hint_lbl.setText("")
+
         self._prestige_btn.setEnabled(can)
-        self._prestige_btn.setText(f"✦ Prestige {self._selected_prestige_count}x")
+        self._prestige_btn.setText(f"  Prestige  {max_count}×" if can else "  Prestige")
+        if can:
+            btn_bg = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #7020B8, stop:1 #9848E0)"
+            btn_hover = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #5A10A0, stop:1 #7A38C8)"
+        else:
+            btn_bg = PALETTE["text_dim"]
+            btn_hover = PALETTE["text_dim"]
         self._prestige_btn.setStyleSheet(f"""
             QPushButton {{
-                background: {'#9040D0' if can else PALETTE['text_dim']};
+                background: {btn_bg};
                 color: white;
                 border: none;
-                border-radius: 14px;
+                border-radius: 16px;
                 font-family: '{FONT_TITLE}';
-                font-size: 14pt;
+                font-size: {int(15 * APP_SCALE)}pt;
                 font-weight: bold;
             }}
-            QPushButton:hover {{ background: {'#7030B0' if can else PALETTE['text_dim']}; }}
+            QPushButton:hover {{ background: {btn_hover}; }}
         """)
-        for frame in getattr(self, "_coin_rows", []):
+
+        # Pulse glow when affordable, stop when not
+        if can and not self._glow_active:
+            self._glow_seq.start()
+            self._glow_active = True
+        elif not can and self._glow_active:
+            self._glow_seq.stop()
+            self._prestige_glow_eff.setBlurRadius(4)
+            self._glow_active = False
+
+        for frame in self._coin_rows:
             bid = frame._bonus_id
             frame._stacks_lbl.setText(str(self._state.prestige_bonuses.get(bid, 0)))
             frame._btn.setEnabled(coins > 0)
+            frame._qty_spin.setMaximum(max(1, coins))
 
     def _adjust_prestige_count(self, delta: int):
         max_count = max(1, self._state.max_consecutive_prestiges())
@@ -3958,26 +5678,257 @@ class PrestigePage(QWidget):
         self._selected_prestige_count = max(1, self._state.max_consecutive_prestiges())
         self.refresh()
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "_confirm_overlay"):
+            self._confirm_overlay.setGeometry(0, 0, self.width(), self.height())
+
     def _do_prestige(self):
-        count = max(1, self._selected_prestige_count)
+        count = self._state.max_consecutive_prestiges()
+        if count <= 0:
+            return
         cost = self._state.total_prestige_cost(count)
-        reply = QMessageBox.question(
-            self, "Confirm Prestige",
-            f"Spend {cost:,}🪙 to prestige {count} time(s)?\n"
-            f"This resets gold, skills, inventory, active refining, and upgrades.\n"
-            f"You'll gain {count} Prestige Coin{'s' if count != 1 else ''}.",
-            QMessageBox.Yes | QMessageBox.No
+        earned_coins = self._state.coins_for_prestige_count(count)
+        self._conf_pending_count = count
+        self._conf_detail_lbl.setText(
+            f"Prestige {count} time{'s' if count != 1 else ''}?\n\n"
+            f"Cost: {fmt_number(cost)} Gold\n"
+            f"Earn: {earned_coins} prestige coin{'s' if earned_coins != 1 else ''}"
         )
-        if reply == QMessageBox.Yes:
-            win = self.window()
-            if hasattr(win, "execute_prestige"):
-                win.execute_prestige(count)
+        self._confirm_overlay.setGeometry(0, 0, self.width(), self.height())
+        self._confirm_overlay.raise_()
+        self._confirm_overlay.show()
+
+    def _confirm_prestige(self):
+        self._confirm_overlay.hide()
+        count = getattr(self, "_conf_pending_count", 0)
+        if count <= 0:
+            return
+        win = self.window()
+        if hasattr(win, "execute_prestige"):
+            win.execute_prestige(count)
 
 
 
 # ---------------------------------------------------------------------------
 # PAGE: SKILLS
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# ODOMETER WIDGET  (used by prestige overlay)
+# ---------------------------------------------------------------------------
+class _TierOdometer(QWidget):
+    """Draws a tier number that slides upward like an old clock when changed."""
+    all_done = Signal()
+
+    def __init__(self, value: int, font: QFont, color: str, parent=None):
+        super().__init__(parent)
+        self._current = str(value)
+        self._next = str(value)
+        self._font = font
+        self._color = QColor(color)
+        self._slide = 0.0
+        self._pending = []
+        self._running = False
+        self._anim = QPropertyAnimation(self, b"slide", self)
+        self._anim.setDuration(380)
+        self._anim.setEasingCurve(QEasingCurve.InOutCubic)
+        self._anim.setStartValue(0.0)
+        self._anim.setEndValue(1.0)
+        self._anim.finished.connect(self._on_anim_done)
+        self._recalc_size()
+
+    def _recalc_size(self):
+        fm = QFontMetrics(self._font)
+        self.setFixedSize(fm.horizontalAdvance("000") + sz(12), fm.height())
+
+    def _get_slide(self) -> float:
+        return self._slide
+
+    def _set_slide(self, v: float):
+        self._slide = v
+        self.update()
+
+    slide = Property(float, _get_slide, _set_slide)
+
+    def setDisplayFont(self, font: QFont):
+        self._font = font
+        self._recalc_size()
+        self.update()
+
+    def setDisplayColor(self, color: str):
+        self._color = QColor(color)
+        self.update()
+
+    def advanceTo(self, value: int):
+        self._pending.append(str(value))
+        if not self._running:
+            self._start_next()
+
+    def _start_next(self):
+        if not self._pending:
+            self.all_done.emit()
+            return
+        self._next = self._pending.pop(0)
+        self._slide = 0.0
+        self._running = True
+        self._anim.start()
+
+    def _on_anim_done(self):
+        self._current = self._next
+        self._slide = 0.0
+        self._running = False
+        self._start_next()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.TextAntialiasing)
+        painter.setFont(self._font)
+        painter.setPen(self._color)
+        painter.setClipRect(self.rect())
+        h = self.height()
+        w = self.width()
+        # current slides up and out; next slides up from below
+        y_cur = int(-self._slide * h)
+        y_nxt = int((1.0 - self._slide) * h)
+        flags = Qt.AlignCenter
+        if self._slide < 1.0:
+            painter.drawText(QRect(0, y_cur, w, h), flags, self._current)
+        if self._slide > 0.0:
+            painter.drawText(QRect(0, y_nxt, w, h), flags, self._next)
+        painter.end()
+
+
+# ---------------------------------------------------------------------------
+# PRESTIGE ANIMATION OVERLAY
+# ---------------------------------------------------------------------------
+class PrestigeAnimOverlay(QWidget):
+    """Full-window overlay: prestige animation + rolling tier counter."""
+
+    def __init__(self, parent: QWidget, old_tier: int, new_tier: int):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+        self._old_tier = old_tier
+        self._new_tier = new_tier
+        self._dismissable = False
+        self.setGeometry(parent.rect())
+        self.setStyleSheet(
+            "background: qlineargradient(x1:0, y1:0, x2:0, y2:1,"
+            " stop:0 rgba(10,5,25,218), stop:1 rgba(38,15,70,218));"
+        )
+
+        lay = QVBoxLayout(self)
+        lay.setAlignment(Qt.AlignCenter)
+        lay.setSpacing(sz(10))
+        lay.setContentsMargins(sz(20), sz(30), sz(20), sz(30))
+
+        # ── Sprite ────────────────────────────────────────────────────
+        frames = load_sprite_sheet("prestige.png", 640, 640, 36)
+        if frames:
+            target = min(sz(260), parent.width() - sz(60))
+            frames = [f.scaled(target, target, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                      for f in frames]
+            self._sprite = SpriteWidget(frames, delay_ms=100, loop=False)
+            self._sprite.setFixedSize(target, target)
+            self._sprite.animation_done.connect(self._on_sprite_done)
+            lay.addWidget(self._sprite, alignment=Qt.AlignCenter)
+        else:
+            self._sprite = None
+
+        # ── Tier counter (odometer, rolls up from old to new) ───────────
+        _tier_font = scaled_font(FONT_TITLE, 36, bold=True)
+        _tier_row_w = QWidget()
+        _tier_row_w.setStyleSheet("background: transparent;")
+        _tier_row_lay = QHBoxLayout(_tier_row_w)
+        _tier_row_lay.setContentsMargins(0, 0, 0, 0)
+        _tier_row_lay.setSpacing(sz(10))
+        _tier_row_lay.setAlignment(Qt.AlignCenter | Qt.AlignVCenter)
+
+        self._tier_prefix_lbl = QLabel("TIER")
+        self._tier_prefix_lbl.setFont(_tier_font)
+        self._tier_prefix_lbl.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        self._tier_prefix_lbl.setStyleSheet(
+            f"color: {PALETTE['accent']}; background: transparent; border: none;"
+        )
+        _tier_row_lay.addWidget(self._tier_prefix_lbl)
+
+        self._tier_odm = _TierOdometer(old_tier, _tier_font, PALETTE["accent"], self)
+        self._tier_odm.all_done.connect(self._finish_roll)
+        _tier_row_lay.addWidget(self._tier_odm)
+
+        lay.addWidget(_tier_row_w, alignment=Qt.AlignCenter)
+
+        # Small context label when multi-prestiging
+        if new_tier - old_tier > 1:
+            multi_lbl = QLabel(f"+{new_tier - old_tier} prestiges")
+            multi_lbl.setFont(scaled_font(FONT_BODY, 10))
+            multi_lbl.setAlignment(Qt.AlignCenter)
+            multi_lbl.setStyleSheet(
+                f"color: {PALETTE['text_muted']}; background: transparent; border: none;"
+            )
+            lay.addWidget(multi_lbl)
+
+        # Tap-to-dismiss hint (shown after roll completes)
+        self._hint_lbl = QLabel("Tap anywhere to dismiss")
+        self._hint_lbl.setFont(scaled_font(FONT_BODY, 9))
+        self._hint_lbl.setAlignment(Qt.AlignCenter)
+        self._hint_lbl.setStyleSheet(
+            f"color: {PALETTE['text_dim']}; background: transparent; border: none;"
+        )
+        self._hint_lbl.hide()
+        lay.addWidget(self._hint_lbl)
+
+        # ── Animations ────────────────────────────────────────────────
+        # Overlay fade-out
+        self._eff = QGraphicsOpacityEffect(self)
+        self._eff.setOpacity(1.0)
+        self.setGraphicsEffect(self._eff)
+        self._fade_anim = QPropertyAnimation(self._eff, b"opacity", self)
+        self._fade_anim.setDuration(700)
+        self._fade_anim.setStartValue(1.0)
+        self._fade_anim.setEndValue(0.0)
+        self._fade_anim.finished.connect(self.deleteLater)
+
+        self.show()
+        self.raise_()
+        if self._sprite:
+            self._sprite.play(loop=False)
+        else:
+            QTimer.singleShot(300, self._on_sprite_done)
+
+    def _on_sprite_done(self):
+        def _queue():
+            if self._new_tier > self._old_tier:
+                for t in range(self._old_tier + 1, self._new_tier + 1):
+                    self._tier_odm.advanceTo(t)
+            else:
+                self._finish_roll()
+        QTimer.singleShot(150, _queue)
+
+    def _finish_roll(self):
+        """Called by _TierOdometer.all_done when the last slide finishes."""
+        _final_font = scaled_font(FONT_TITLE, 44, bold=True)
+        self._tier_prefix_lbl.setFont(_final_font)
+        self._tier_prefix_lbl.setStyleSheet(
+            f"color: {PALETTE['prestige']}; background: transparent; border: none;"
+        )
+        self._tier_odm.setDisplayFont(_final_font)
+        self._tier_odm.setDisplayColor(PALETTE["prestige"])
+        self._dismissable = True
+        self._hint_lbl.show()
+        # Auto-dismiss after 2 seconds
+        QTimer.singleShot(2000, self._start_fade)
+
+    def _start_fade(self):
+        if not self._dismissable:
+            return
+        self._dismissable = False   # prevent double-trigger
+        self._fade_anim.start()
+
+    def mousePressEvent(self, event):
+        if self._dismissable:
+            self._start_fade()
 
 
 # ---------------------------------------------------------------------------
@@ -3996,10 +5947,20 @@ class MainWindow(QMainWindow):
 
         # Central widget
         central = QWidget()
+        self._central = central
+        central.setStyleSheet("background: transparent;")
         self.setCentralWidget(central)
         main_lay = QVBoxLayout(central)
         main_lay.setContentsMargins(0, 0, 0, 0)
         main_lay.setSpacing(0)
+
+        # Parallax background — manual child of central, sits below the layout
+        self._parallax = ParallaxBackground(central)
+        self._parallax.setGeometry(central.rect())
+        self._parallax.lower()
+        # Mouse tracker — observes all app events so drag works everywhere
+        self._parallax_tracker = _ParallaxMouseTracker(self._parallax, self)
+        QApplication.instance().installEventFilter(self._parallax_tracker)
 
         # Header
         self._header = HeaderBar(self._state, self)
@@ -4008,7 +5969,7 @@ class MainWindow(QMainWindow):
 
         # Page stack
         self._stack = QStackedWidget()
-        self._stack.setStyleSheet(f"background: {PALETTE['bg_dark']};")
+        self._stack.setStyleSheet("background: transparent;")
         main_lay.addWidget(self._stack, stretch=1)
 
         # Pages
@@ -4026,6 +5987,15 @@ class MainWindow(QMainWindow):
             self._prestige_page,
         ]:
             self._stack.addWidget(page)
+
+        # Settings overlay — floats above everything as a centered card
+        self._settings_overlay = SettingsOverlay(self._state, central)
+
+        # Snow overlay — child of _stack so it paints above page content
+        self._snow_overlay = SnowWidget(self._stack)
+        self._snow_overlay.setGeometry(self._stack.rect())
+        self._snow_overlay.raise_()
+        self._snow_overlay.show()  # showEvent will start timer when visible
 
         # Nav
         self._nav = NavBar(self)
@@ -4059,9 +6029,11 @@ class MainWindow(QMainWindow):
         count = max(1, min(count, self._state.max_consecutive_prestiges()))
         if count <= 0:
             return False
+        old_tier = self._state.prestige_tier
         self._refine_page.cancel_all_refining()
         if not self._state.do_prestige(count):
             return False
+        self._state.save()
         BUS.gold_changed.emit()
         BUS.inventory_changed.emit()
         BUS.prestige_changed.emit()
@@ -4070,10 +6042,31 @@ class MainWindow(QMainWindow):
         self._items_page.refresh()
         self._upgrades_page.refresh()
         self._prestige_page.refresh()
+        PrestigeAnimOverlay(self, old_tier, self._state.prestige_tier)
+        # Notify player of newly accessible resource nodes
+        new_tier = self._state.prestige_tier
+        unlocked_names = [
+            nd["name"]
+            for nid, nd in RESOURCE_NODES.items()
+            if old_tier < nd.get("prestige_req", 0) <= new_tier
+        ]
+        if unlocked_names:
+            QTimer.singleShot(
+                2200,
+                lambda names=unlocked_names: self._toast.show_message(
+                    f"Unlocked: {', '.join(names)}!", PALETTE["success"]
+                ),
+            )
         return True
 
     def _switch_page(self, idx: int):
         self._stack.setCurrentIndex(idx)
+        # Show snow overlay only on gather page (idx 0)
+        if idx == 0:
+            self._snow_overlay.show()
+            self._snow_overlay.raise_()
+        else:
+            self._snow_overlay.hide()
         # Refresh the page being shown
         pages = [
             self._gather_page,
@@ -4086,8 +6079,9 @@ class MainWindow(QMainWindow):
             pages[idx].refresh()
 
     def _open_settings(self):
-        dlg = SettingsDialog(self)
-        dlg.exec()
+        self._settings_overlay.setGeometry(self._central.rect())
+        self._settings_overlay.raise_()
+        self._settings_overlay.show()
 
     def _autosave(self):
         self._state.save()
@@ -4096,7 +6090,7 @@ class MainWindow(QMainWindow):
         LevelUpToast(skill_id, new_level, self)
 
     def _spawn_gold_float(self, delta: float):
-        text = f"+{int(delta):,}\U0001fa99" if delta > 0 else f"{int(delta):,}\U0001fa99"
+        text = f"{COIN_SMALL_HTML}+{int(delta):,}" if delta > 0 else f"{COIN_SMALL_HTML}{int(delta):,}"
         color = PALETTE["gold"] if delta > 0 else PALETTE["danger"]
         spawn_floating_text(text, color, self, cx=self.width() // 2, cy=100)
 
@@ -4109,11 +6103,18 @@ class MainWindow(QMainWindow):
         spawn_floating_text(text, color, self, cx=self.width() // 2, cy=100)
 
     def closeEvent(self, event):
-        self._state.save()
+        if not _RESET_PENDING:
+            self._state.save()
         super().closeEvent(event)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        # Keep parallax covering the full central widget area
+        if hasattr(self, "_parallax"):
+            self._parallax.setGeometry(self.centralWidget().rect())
+        # Keep snow overlay covering the full stack area
+        if hasattr(self, "_snow_overlay"):
+            self._snow_overlay.setGeometry(self._stack.rect())
         # Reposition toast
         if hasattr(self, "_toast"):
             w = self._toast.width()
@@ -4127,6 +6128,11 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("CraftIdle")
     app.setStyle("Fusion")
+
+    # Load custom fonts before any widgets are created
+    for _font_file in ("Skranji-Bold.ttf", "Skranji-Regular.ttf"):
+        _font_path = str(BASE_DIR / _font_file)
+        QFontDatabase.addApplicationFont(_font_path)
 
     # -----------------------------------------------------------------------
     # Determine UI scale before any widgets are created
@@ -4183,8 +6189,9 @@ def main():
     global AUDIO
     AUDIO = AudioManager()
     cfg_audio = load_config()
-    AUDIO.set_sfx_volume(cfg_audio.get("sfx_volume", 0.8))
+    AUDIO.set_sfx_volume(cfg_audio.get("sfx_volume", 0.35))
     AUDIO.set_music_volume(cfg_audio.get("music_volume", 0.5))
+    AUDIO.start_bgm()
 
     win = MainWindow()
     # Show fullscreen / maximized on mobile-sized screens
